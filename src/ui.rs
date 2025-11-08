@@ -130,8 +130,12 @@ impl UI {
             ])
             .split(content_layout[1]);
 
-        self.file_tree
-            .render(f, content_layout[0], self.metadata.as_ref());
+        self.file_tree.render(
+            f,
+            content_layout[0],
+            self.metadata.as_ref(),
+            self.engine.current_file_index,
+        );
         self.editor.render(f, right_layout[0], &self.engine);
         self.terminal.render(f, right_layout[1]);
         self.status_bar

@@ -78,6 +78,7 @@ pub enum AnimationStep {
     DeleteLine { line: usize },
     MoveCursor { line: usize, col: usize },
     Pause { duration_ms: u64 },
+    SwitchFile { file_index: usize, content: String },
 }
 
 /// Animation state machine
@@ -101,6 +102,7 @@ pub struct AnimationEngine {
     pub cursor_visible: bool,
     cursor_blink_timer: Instant,
     viewport_height: usize,
+    pub current_file_index: usize,
 }
 
 impl AnimationEngine {
@@ -116,6 +118,7 @@ impl AnimationEngine {
             cursor_visible: true,
             cursor_blink_timer: Instant::now(),
             viewport_height: 20, // Default, will be updated from UI
+            current_file_index: 0,
         }
     }
 
@@ -128,13 +131,33 @@ impl AnimationEngine {
         self.steps.clear();
         self.current_step = 0;
         self.state = AnimationState::Playing;
+        self.current_file_index = 0;
 
-        // For now, just handle the first file change
-        if let Some(change) = metadata.changes.first() {
+        // Process all file changes
+        for (index, change) in metadata.changes.iter().enumerate() {
+            // Add file switch step
+            let content = change.old_content.clone().unwrap_or_default();
+            self.steps.push(AnimationStep::SwitchFile {
+                file_index: index,
+                content: content.clone(),
+            });
+
+            // Add pause before starting file animation
+            self.steps.push(AnimationStep::Pause { duration_ms: 1000 });
+
+            // Generate animation steps for this file
             self.generate_steps_for_file(change);
+
+            // Add pause between files
+            if index < metadata.changes.len() - 1 {
+                self.steps.push(AnimationStep::Pause { duration_ms: 2000 });
+            }
         }
 
-        // Start with the old content
+        // Final pause
+        self.steps.push(AnimationStep::Pause { duration_ms: 3000 });
+
+        // Start with the first file's content
         if let Some(change) = metadata.changes.first() {
             if let Some(old_content) = &change.old_content {
                 self.buffer = EditorBuffer::from_content(old_content);
@@ -146,17 +169,12 @@ impl AnimationEngine {
 
     /// Generate animation steps for a file change
     fn generate_steps_for_file(&mut self, change: &FileChange) {
-        // Add pause at the beginning
-        self.steps.push(AnimationStep::Pause { duration_ms: 1000 });
-
         // Process each hunk
         for hunk in &change.hunks {
             self.generate_steps_for_hunk(hunk);
             // Add pause between hunks
-            self.steps.push(AnimationStep::Pause { duration_ms: 2000 });
+            self.steps.push(AnimationStep::Pause { duration_ms: 1500 });
         }
-
-        self.steps.push(AnimationStep::Pause { duration_ms: 3000 });
     }
 
     /// Generate animation steps for a diff hunk
@@ -281,6 +299,14 @@ impl AnimationEngine {
             }
             AnimationStep::Pause { duration_ms } => {
                 self.pause_until = Some(Instant::now() + Duration::from_millis(duration_ms));
+            }
+            AnimationStep::SwitchFile {
+                file_index,
+                content,
+            } => {
+                // Switch to new file
+                self.current_file_index = file_index;
+                self.buffer = EditorBuffer::from_content(&content);
             }
         }
 

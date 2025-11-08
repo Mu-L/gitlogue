@@ -10,7 +10,13 @@ use ratatui::{
 pub struct FileTreePane;
 
 impl FileTreePane {
-    pub fn render(&self, f: &mut Frame, area: Rect, metadata: Option<&CommitMetadata>) {
+    pub fn render(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        metadata: Option<&CommitMetadata>,
+        current_file_index: usize,
+    ) {
         let block = Block::default()
             .title("File Tree")
             .borders(Borders::ALL)
@@ -19,7 +25,8 @@ impl FileTreePane {
         let lines = if let Some(meta) = metadata {
             meta.changes
                 .iter()
-                .map(|change| {
+                .enumerate()
+                .map(|(index, change)| {
                     let (status_char, color) = match change.status.as_str() {
                         "A" => ("+", Color::Green),
                         "D" => ("-", Color::Red),
@@ -28,13 +35,25 @@ impl FileTreePane {
                         _ => (" ", Color::White),
                     };
 
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{} ", status_char),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(&change.path),
-                    ])
+                    let mut spans = vec![Span::styled(
+                        format!("{} ", status_char),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    )];
+
+                    // Highlight current file
+                    if index == current_file_index {
+                        spans.push(Span::styled(
+                            &change.path,
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        spans.push(Span::raw(&change.path));
+                    }
+
+                    Line::from(spans)
                 })
                 .collect()
         } else {
