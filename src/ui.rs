@@ -10,26 +10,50 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use std::time::{Duration, Instant};
 
+use crate::animation::AnimationEngine;
+use crate::git::{CommitMetadata, GitRepository};
 use crate::panes::{EditorPane, FileTreePane, StatusBarPane, TerminalPane};
 
-pub struct UI {
-    should_quit: bool,
+#[derive(Debug, Clone, PartialEq)]
+enum UIState {
+    Playing,
+    WaitingForNext { resume_at: Instant },
+    Finished,
+}
+
+pub struct UI<'a> {
+    state: UIState,
+    speed_ms: u64,
     file_tree: FileTreePane,
     editor: EditorPane,
     terminal: TerminalPane,
     status_bar: StatusBarPane,
+    engine: AnimationEngine,
+    metadata: Option<CommitMetadata>,
+    repo: Option<&'a GitRepository>,
 }
 
-impl UI {
-    pub fn new() -> Self {
+impl<'a> UI<'a> {
+    pub fn new(speed_ms: u64, _is_commit_specified: bool, repo: Option<&'a GitRepository>) -> Self {
         Self {
-            should_quit: false,
+            state: UIState::Playing,
+            speed_ms,
             file_tree: FileTreePane,
             editor: EditorPane,
             terminal: TerminalPane,
             status_bar: StatusBarPane,
+            engine: AnimationEngine::new(speed_ms),
+            metadata: None,
+            repo,
         }
+    }
+
+    pub fn load_commit(&mut self, metadata: CommitMetadata) {
+        self.engine.load_commit(&metadata);
+        self.metadata = Some(metadata);
+        self.state = UIState::Playing;
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -54,21 +78,70 @@ impl UI {
 
     fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         loop {
-            terminal.draw(|f| self.render(f))?;
+            // Update viewport height for scroll calculation
+            // Main content area height - status bar (3) - borders (2) = editor height
+            let size = terminal.size()?;
+            let editor_height = size
+                .height
+                .saturating_sub(3) // Status bar
+                .saturating_sub(2); // Main content borders
+            let viewport_height = (editor_height as f32 * 0.8) as usize; // 80% for editor
+            let viewport_height = viewport_height.saturating_sub(2); // Editor borders
+            self.engine.set_viewport_height(viewport_height);
 
-            if event::poll(std::time::Duration::from_millis(100))? {
+            // Tick the animation engine
+            let needs_redraw = self.engine.tick();
+
+            if needs_redraw {
+                terminal.draw(|f| self.render(f))?;
+            }
+
+            if event::poll(std::time::Duration::from_millis(1))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
-                            self.should_quit = true;
+                            self.state = UIState::Finished;
                         }
                         _ => {}
                     }
                 }
             }
 
-            if self.should_quit {
-                break;
+            // State machine
+            match self.state {
+                UIState::Playing => {
+                    if self.engine.is_finished() {
+                        if self.repo.is_some() {
+                            // Random mode - schedule next commit
+                            // Wait time proportional to speed (100x the typing speed)
+                            self.state = UIState::WaitingForNext {
+                                resume_at: Instant::now() + Duration::from_millis(self.speed_ms * 100),
+                            };
+                        } else {
+                            // Single commit mode - quit
+                            self.state = UIState::Finished;
+                        }
+                    }
+                }
+                UIState::WaitingForNext { resume_at } => {
+                    if Instant::now() >= resume_at {
+                        if let Some(repo) = self.repo {
+                            match repo.random_commit() {
+                                Ok(metadata) => {
+                                    self.load_commit(metadata);
+                                }
+                                Err(_) => {
+                                    self.state = UIState::Finished;
+                                }
+                            }
+                        } else {
+                            self.state = UIState::Finished;
+                        }
+                    }
+                }
+                UIState::Finished => {
+                    break;
+                }
             }
         }
 
@@ -102,9 +175,15 @@ impl UI {
             ])
             .split(content_layout[1]);
 
-        self.file_tree.render(f, content_layout[0]);
-        self.editor.render(f, right_layout[0]);
-        self.terminal.render(f, right_layout[1]);
-        self.status_bar.render(f, main_layout[1]);
+        self.file_tree.render(
+            f,
+            content_layout[0],
+            self.metadata.as_ref(),
+            self.engine.current_file_index,
+        );
+        self.editor.render(f, right_layout[0], &self.engine);
+        self.terminal.render(f, right_layout[1], &self.engine);
+        self.status_bar
+            .render(f, main_layout[1], self.metadata.as_ref());
     }
 }

@@ -1,3 +1,4 @@
+mod animation;
 mod git;
 mod panes;
 mod ui;
@@ -69,113 +70,23 @@ impl Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let _repo_path = args.validate()?;
+    let repo_path = args.validate()?;
+    let repo = GitRepository::open(&repo_path)?;
 
-    // Launch UI
-    let mut ui = UI::new();
+    let is_commit_specified = args.commit.is_some();
+
+    // Load initial commit
+    let metadata = if let Some(commit_hash) = &args.commit {
+        repo.get_commit(commit_hash)?
+    } else {
+        repo.random_commit()?
+    };
+
+    // Create UI with repository reference (for random mode) or without (for single commit mode)
+    let repo_ref = if is_commit_specified { None } else { Some(&repo) };
+    let mut ui = UI::new(args.speed, is_commit_specified, repo_ref);
+    ui.load_commit(metadata);
     ui.run()?;
 
-    // TODO: Integrate with git module to load and display commits
-    // let repo = GitRepository::open(&repo_path)?;
-    // if let Some(commit_hash) = &args.commit {
-    //     let metadata = repo.get_commit(commit_hash)?;
-    // } else {
-    //     let metadata = repo.random_commit()?;
-    // }
-
     Ok(())
-}
-
-fn print_commit_info(metadata: &git::CommitMetadata) {
-    println!("  Hash:    {}", metadata.hash);
-    println!("  Author:  {}", metadata.author);
-    println!("  Date:    {}", metadata.date.format("%Y-%m-%d %H:%M:%S"));
-    println!("  Message: {}", metadata.message);
-    println!();
-    println!("  Files changed: {}", metadata.changes.len());
-    for change in &metadata.changes {
-        let mut display_path = format!("{} {}", change.status.as_str(), change.path);
-        if let Some(old_path) = &change.old_path {
-            display_path = format!("{} {} -> {}", change.status.as_str(), old_path, change.path);
-        }
-        if change.is_binary {
-            display_path.push_str(" (binary)");
-        }
-        println!("    {}", display_path);
-    }
-
-    if !metadata.changes.is_empty() {
-        println!();
-        println!("  File contents:");
-        for change in &metadata.changes {
-            println!("    File: {}", change.path);
-            if change.is_binary {
-                println!("      (binary file)");
-                continue;
-            }
-
-            if let Some(old) = &change.old_content {
-                let lines = old.lines().count();
-                println!("      Old content: {} lines", lines);
-            } else {
-                println!("      Old content: (none - new file)");
-            }
-
-            if let Some(new) = &change.new_content {
-                let lines = new.lines().count();
-                println!("      New content: {} lines", lines);
-            } else {
-                println!("      New content: (none - deleted file)");
-            }
-        }
-
-        println!();
-        println!("  Structured changes:");
-        for change in &metadata.changes {
-            println!("    File: {}", change.path);
-            if change.is_binary {
-                println!("      (binary file)");
-                continue;
-            }
-
-            println!("      Hunks: {}", change.hunks.len());
-            for (i, hunk) in change.hunks.iter().enumerate() {
-                println!(
-                    "        Hunk #{}: @@ -{},{} +{},{} @@",
-                    i + 1,
-                    hunk.old_start,
-                    hunk.old_lines,
-                    hunk.new_start,
-                    hunk.new_lines
-                );
-
-                let additions = hunk
-                    .lines
-                    .iter()
-                    .filter(|l| matches!(l.change_type, git::LineChangeType::Addition))
-                    .count();
-                let deletions = hunk
-                    .lines
-                    .iter()
-                    .filter(|l| matches!(l.change_type, git::LineChangeType::Deletion))
-                    .count();
-
-                println!(
-                    "          Lines: {} total (+{} -{} context:{})",
-                    hunk.lines.len(),
-                    additions,
-                    deletions,
-                    hunk.lines.len() - additions - deletions
-                );
-            }
-        }
-
-        println!();
-        println!("  Raw diff:");
-        for change in &metadata.changes {
-            if !change.diff.is_empty() {
-                println!("{}", change.diff);
-            }
-        }
-    }
 }
