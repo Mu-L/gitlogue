@@ -328,8 +328,12 @@ impl AnimationEngine {
                     self.steps.push(AnimationStep::Pause {
                         duration_ms: (self.speed_ms as f64 * OPEN_FILE_PAUSE) as u64,
                     });
+                    let reason = change
+                        .exclusion_reason
+                        .as_deref()
+                        .unwrap_or("excluded file");
                     self.steps.push(AnimationStep::TerminalOutput {
-                        text: format!("📦 {} (skipped - generated file)", change.path),
+                        text: format!("📦 {} (skipped - {})", change.path, reason),
                     });
                     self.steps.push(AnimationStep::Pause {
                         duration_ms: (self.speed_ms as f64 * OPEN_CMD_PAUSE) as u64,

@@ -8,6 +8,10 @@ use std::path::Path;
 // Maximum blob size to read (500KB)
 const MAX_BLOB_SIZE: usize = 500 * 1024;
 
+// Maximum number of changed lines per file to animate
+// Files with more changes will be skipped to prevent performance issues
+const MAX_CHANGE_LINES: usize = 2000;
+
 // Files to exclude from diff animation (lock files and generated files)
 const EXCLUDED_FILES: &[&str] = &[
     // JavaScript/Node.js
@@ -53,6 +57,9 @@ const EXCLUDED_PATTERNS: &[&str] = &[
     ".js.map",
     ".css.map",
     ".d.ts.map",
+    // Test snapshots
+    ".snap",
+    "__snapshots__",
 ];
 
 /// Check if a file should be excluded from diff animation
@@ -66,7 +73,7 @@ pub fn should_exclude_file(path: &str) -> bool {
 
     // Check if it matches excluded patterns
     for pattern in EXCLUDED_PATTERNS {
-        if filename.ends_with(pattern) {
+        if filename.ends_with(pattern) || path.contains(pattern) {
             return true;
         }
     }
@@ -154,6 +161,7 @@ pub struct FileChange {
     #[allow(dead_code)]
     pub is_binary: bool,
     pub is_excluded: bool,
+    pub exclusion_reason: Option<String>,
     pub old_content: Option<String>,
     #[allow(dead_code)]
     pub new_content: Option<String>,
@@ -395,7 +403,24 @@ impl GitRepository {
                 }
             }
 
-            let is_excluded = should_exclude_file(&path);
+            // Calculate total changed lines (additions + deletions)
+            let total_changed_lines: usize = hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| !matches!(line.change_type, LineChangeType::Context))
+                .count();
+
+            // Determine exclusion reason
+            let (is_excluded, exclusion_reason) = if should_exclude_file(&path) {
+                (true, Some("lock/generated file".to_string()))
+            } else if total_changed_lines > MAX_CHANGE_LINES {
+                (
+                    true,
+                    Some(format!("too many changes ({} lines)", total_changed_lines)),
+                )
+            } else {
+                (false, None)
+            };
 
             changes.push(FileChange {
                 path,
@@ -403,6 +428,7 @@ impl GitRepository {
                 status,
                 is_binary,
                 is_excluded,
+                exclusion_reason,
                 old_content,
                 new_content,
                 hunks,
@@ -485,5 +511,13 @@ mod tests {
         assert!(!should_exclude_file("styles.css"));
         assert!(!should_exclude_file("lock.txt"));
         assert!(!should_exclude_file("minify.rs"));
+    }
+
+    #[test]
+    fn test_should_exclude_snapshot_files() {
+        assert!(should_exclude_file("component.test.ts.snap"));
+        assert!(should_exclude_file("tests/__snapshots__/test.snap"));
+        assert!(should_exclude_file("__snapshots__/component.snap"));
+        assert!(should_exclude_file("src/__snapshots__/app.test.js.snap"));
     }
 }
