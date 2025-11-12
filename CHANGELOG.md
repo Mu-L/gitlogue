@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] - 2025-11-12
+
+### 🐛 Bug Fixes
+
+- fix: include LICENSE-THIRD-PARTY in package for --license flag ([8b4b3f6](https://github.com/unhappychoice/gitlogue/commit/8b4b3f6))
+
+### 📝 Other Changes
+
+- chore: bump version to v0.0.5 ([2d557cc](https://github.com/unhappychoice/gitlogue/commit/2d557cc))
+
+
 ## [0.0.4] - 2025-11-12
 
 ### 🐛 Bug Fixes
@@ -13,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📝 Other Changes
 
-- chore: bump version to v0.0.4 ([8a46b0a](https://github.com/unhappychoice/gitlogue/commit/8a46b0a))
+- chore: bump version to v0.0.4 ([8df1167](https://github.com/unhappychoice/gitlogue/commit/8df1167))
 
 
 ## [0.0.3] - 2025-11-12
