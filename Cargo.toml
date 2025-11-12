@@ -7,6 +7,23 @@ description = "A Git history screensaver - watch your code rewrite itself"
 license = "ISC"
 repository = "https://github.com/unhappychoice/gitlogue"
 
+exclude = [
+    "*.png",
+    "*.gif",
+    "*.jpg",
+    "*.jpeg",
+    "*.mp4",
+    "docs/",
+    "examples/",
+    ".github/",
+    "Formula/",
+    "LICENSE-THIRD-PARTY",
+    "about.toml",
+    "about.hbs",
+    "generate_changelog.sh",
+    "install.sh",
+]
+
 [dependencies]
 git2 = { version = "0.19", features = ["vendored-openssl", "vendored-libgit2"] }
 ratatui = "0.29"
