@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2025-11-12
+
+### 🐛 Bug Fixes
+
+- fix: use vendored OpenSSL and libgit2 for cross-platform builds ([371338d](https://github.com/unhappychoice/gitlogue/commit/371338d))
+
+### 📝 Other Changes
+
+- chore: bump version to v0.0.3 ([0f2ec8f](https://github.com/unhappychoice/gitlogue/commit/0f2ec8f))
+
+
 ## [0.0.2] - 2025-11-12
 
 ### ✨ Features
@@ -86,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📝 Other Changes
 
-- chore: bump version to v0.0.2 ([9d98446](https://github.com/unhappychoice/gitlogue/commit/9d98446))
+- chore: bump version to v0.0.2 ([202a411](https://github.com/unhappychoice/gitlogue/commit/202a411))
 - docs: update installation guide with new methods ([da9c4ff](https://github.com/unhappychoice/gitlogue/commit/da9c4ff))
 - chore: set initial version to 0.0.1 ([4d81819](https://github.com/unhappychoice/gitlogue/commit/4d81819))
 - docs: add installation methods to README ([1ac5d90](https://github.com/unhappychoice/gitlogue/commit/1ac5d90))
