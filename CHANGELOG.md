@@ -5,11 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-11-19
+
+### ✨ Features
+
+- feat: add --loop flag for continuous animation playback ([21c86db](https://github.com/unhappychoice/gitlogue/commit/21c86db))
+- feat: add --order flag for commit playback order ([5a45a60](https://github.com/unhappychoice/gitlogue/commit/5a45a60))
+- feat: add syntax highlighting for shell scripts ([76f68e2](https://github.com/unhappychoice/gitlogue/commit/76f68e2))
+- feat: add OGP image generator and social preview ([0b3d187](https://github.com/unhappychoice/gitlogue/commit/0b3d187))
+
+### 🐛 Bug Fixes
+
+- fix: asc/desc order finishes after all commits played ([fe32bbf](https://github.com/unhappychoice/gitlogue/commit/fe32bbf))
+- fix: use ~/.config for config path on all platforms ([b9c18e8](https://github.com/unhappychoice/gitlogue/commit/b9c18e8))
+- fix(deps): update tree-sitter-yaml API usage for 0.7 compatibility ([ce47173](https://github.com/unhappychoice/gitlogue/commit/ce47173))
+- fix(deps): update rand API usage for 0.9 compatibility ([aaf6a98](https://github.com/unhappychoice/gitlogue/commit/aaf6a98))
+
+### 📝 Other Changes
+
+- chore: bump version to v0.2.0 ([1476f57](https://github.com/unhappychoice/gitlogue/commit/1476f57))
+- docs: add --loop option documentation ([0e03086](https://github.com/unhappychoice/gitlogue/commit/0e03086))
+- docs: add --order option documentation ([db237d9](https://github.com/unhappychoice/gitlogue/commit/db237d9))
+- docs: add Terminal Trove Tool of The Week badge ([8fbd92b](https://github.com/unhappychoice/gitlogue/commit/8fbd92b))
+- chore: add CODEOWNERS file ([fddb7fb](https://github.com/unhappychoice/gitlogue/commit/fddb7fb))
+- chore(deps): update tree-sitter-bash to v0.25 ([aa16451](https://github.com/unhappychoice/gitlogue/commit/aa16451))
+- chore(deps): add tree-sitter-bash dependency ([bf7c3c4](https://github.com/unhappychoice/gitlogue/commit/bf7c3c4))
+- chore(deps): bump tree-sitter-yaml from 0.6.1 to 0.7.2 ([5165e90](https://github.com/unhappychoice/gitlogue/commit/5165e90))
+- chore(deps): bump rand from 0.8.5 to 0.9.2 ([2c902a3](https://github.com/unhappychoice/gitlogue/commit/2c902a3))
+- chore(deps): bump toml from 0.8.23 to 0.9.8 ([3a4c730](https://github.com/unhappychoice/gitlogue/commit/3a4c730))
+- chore(deps): bump dirs from 5.0.1 to 6.0.0 ([b8a86ed](https://github.com/unhappychoice/gitlogue/commit/b8a86ed))
+- chore(deps): bump git2 from 0.19.0 to 0.20.2 ([db56c9f](https://github.com/unhappychoice/gitlogue/commit/db56c9f))
+- chore(deps): bump tree-sitter-json from 0.23.0 to 0.24.8 ([0e51963](https://github.com/unhappychoice/gitlogue/commit/0e51963))
+- chore(deps): bump clap from 4.5.51 to 4.5.52 ([8e04f01](https://github.com/unhappychoice/gitlogue/commit/8e04f01))
+- chore(deps): bump crossterm from 0.28.1 to 0.29.0 ([89b4523](https://github.com/unhappychoice/gitlogue/commit/89b4523))
+- chore(deps): bump tree-sitter-md from 0.3.2 to 0.5.1 ([f28e754](https://github.com/unhappychoice/gitlogue/commit/f28e754))
+- chore(deps): bump toml_edit from 0.22.27 to 0.23.7 ([93cba7f](https://github.com/unhappychoice/gitlogue/commit/93cba7f))
+- chore(deps): bump tree-sitter-css from 0.23.2 to 0.25.0 ([f177622](https://github.com/unhappychoice/gitlogue/commit/f177622))
+- chore(deps): bump unicode-width from 0.1.14 to 0.2.0 ([f0c292e](https://github.com/unhappychoice/gitlogue/commit/f0c292e))
+- chore: add dependabot configuration for Cargo dependencies ([720b887](https://github.com/unhappychoice/gitlogue/commit/720b887))
+- docs: add OLED burn-in warning for screensaver mode ([e310e04](https://github.com/unhappychoice/gitlogue/commit/e310e04))
+- refactor: increase OGP image padding for better spacing ([944839d](https://github.com/unhappychoice/gitlogue/commit/944839d))
+
+
 ## [0.1.0] - 2025-11-13
 
 ### 📝 Other Changes
 
-- chore: bump version to v0.1.0 ([10bb7ef](https://github.com/unhappychoice/gitlogue/commit/10bb7ef))
+- chore: bump version to v0.1.0 ([71b65d6](https://github.com/unhappychoice/gitlogue/commit/71b65d6))
 - docs: add screensaver integration examples for Hyprland, Sway, i3, and X11 ([e31b6a4](https://github.com/unhappychoice/gitlogue/commit/e31b6a4))
 - docs: expand Related Projects section with terminal screensavers ([047d7ca](https://github.com/unhappychoice/gitlogue/commit/047d7ca))
 - Revise README for improved clarity and style ([ed8af4a](https://github.com/unhappychoice/gitlogue/commit/ed8af4a))
