@@ -86,6 +86,8 @@ pub fn should_exclude_file(path: &str) -> bool {
 pub struct GitRepository {
     repo: Repository,
     commit_cache: RefCell<Option<Vec<Oid>>>,
+    // Shared index for both cache-based playback (asc/desc) and range playback.
+    // These modes are mutually exclusive based on CLI arguments.
     commit_index: RefCell<usize>,
     commit_range: RefCell<Option<Vec<Oid>>>,
 }
@@ -349,53 +351,55 @@ impl GitRepository {
     }
 
     fn parse_commit_range(&self, range: &str) -> Result<Vec<Oid>> {
-        if range.contains("..") {
-            let parts: Vec<&str> = if range.contains("...") {
-                range.split("...").collect()
-            } else {
-                range.split("..").collect()
-            };
+        // Reject symmetric difference operator (not supported)
+        if range.contains("...") {
+            anyhow::bail!(
+                "Symmetric difference operator '...' is not supported. Use '..' instead (e.g., 'HEAD~5..HEAD')"
+            );
+        }
 
-            if parts.len() != 2 {
-                anyhow::bail!("Invalid range format: {}", range);
-            }
-
-            let start = if parts[0].is_empty() {
-                None
-            } else {
-                Some(self.repo.revparse_single(parts[0])?.id())
-            };
-
-            let end = if parts[1].is_empty() {
-                self.repo.head()?.peel_to_commit()?.id()
-            } else {
-                self.repo.revparse_single(parts[1])?.id()
-            };
-
-            let mut revwalk = self.repo.revwalk()?;
-            revwalk.push(end)?;
-
-            if let Some(start_oid) = start {
-                revwalk.hide(start_oid)?;
-            }
-
-            let mut commits = Vec::new();
-            for oid in revwalk.filter_map(|oid| oid.ok()) {
-                if let Ok(commit) = self.repo.find_commit(oid) {
-                    if commit.parent_count() <= 1 {
-                        commits.push(oid);
-                    }
-                }
-            }
-
-            commits.reverse();
-            Ok(commits)
-        } else {
+        if !range.contains("..") {
             anyhow::bail!(
                 "Invalid range format: {}. Use formats like 'HEAD~5..HEAD' or 'abc123..'",
                 range
             );
         }
+
+        let parts: Vec<&str> = range.split("..").collect();
+        if parts.len() != 2 {
+            anyhow::bail!("Invalid range format: {}", range);
+        }
+
+        let start = if parts[0].is_empty() {
+            None
+        } else {
+            Some(self.repo.revparse_single(parts[0])?.id())
+        };
+
+        let end = if parts[1].is_empty() {
+            self.repo.head()?.peel_to_commit()?.id()
+        } else {
+            self.repo.revparse_single(parts[1])?.id()
+        };
+
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.push(end)?;
+
+        if let Some(start_oid) = start {
+            revwalk.hide(start_oid)?;
+        }
+
+        let mut commits = Vec::new();
+        for oid in revwalk.filter_map(|oid| oid.ok()) {
+            if let Ok(commit) = self.repo.find_commit(oid) {
+                if commit.parent_count() <= 1 {
+                    commits.push(oid);
+                }
+            }
+        }
+
+        commits.reverse();
+        Ok(commits)
     }
 
     fn populate_cache(&self) -> Result<()> {
