@@ -92,8 +92,11 @@ gitlogue -a "john.doe@"
 gitlogue --author "alice" --loop
 ```
 
-This is useful for:
-- Replaying only your own commits
+When using author filtering:
+- Commits are replayed in chronological order (oldest to newest) by default
+- Playback stops after all matching commits are shown
+- Use `--loop` to replay continuously
+- Use `--order` to change playback order
 
 ### `--theme <NAME>`
 
@@ -354,14 +357,17 @@ gitlogue will only show commits from the current branch's history.
 
 ### Filter Commits by Author
 
-Use git to create a filtered view:
+Use the `--author` option to filter commits:
 
 ```bash
-# Create a temporary branch with commits from a specific author
-git log --author="Alice" --pretty=format:"%H" | head -20 | xargs git cherry-pick
+# Show commits from a specific author
+gitlogue --author "Alice"
 
-# Then run gitlogue
-gitlogue
+# Match by email
+gitlogue --author "alice@example.com"
+
+# Combine with other options
+gitlogue --author "Bob" --theme dracula --speed 20
 ```
 
 ### Combine with Terminal Recording
