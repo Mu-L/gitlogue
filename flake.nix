@@ -32,7 +32,7 @@
             hash = "sha256-yZJLCCqJVwAVQfIYfmIFb0h4Dj/sCm/b6dJTsP37bmc=";
           };
           cargoHash = "sha256-9FfaEHi4kJTUXd/OGslnB7f5pRsEvvuVwGAoLPKX+1s=";
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.git ];
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.git pkgs.perl ];
           buildInputs = [ pkgs.openssl ];
           doCheck = false;
         };
@@ -41,7 +41,7 @@
           inherit pname version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.git ];
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.git pkgs.perl ];
           buildInputs = [ pkgs.openssl ];
           doCheck = false;
         };
