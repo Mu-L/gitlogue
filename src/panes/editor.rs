@@ -1,6 +1,3 @@
-use crate::animation::{ActivePane, AnimationEngine};
-use crate::theme::Theme;
-use crate::widgets::SelectableParagraph;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -8,6 +5,10 @@ use ratatui::{
     widgets::{Block, Padding},
     Frame,
 };
+
+use crate::animation::{ActivePane, AnimationEngine};
+use crate::theme::Theme;
+use crate::widgets::SelectableParagraph;
 
 pub struct EditorPane;
 

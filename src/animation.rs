@@ -1,9 +1,11 @@
-use crate::git::{CommitMetadata, DiffHunk, FileChange, FileStatus, LineChangeType};
-use crate::syntax::Highlighter;
-use rand::Rng;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
+
+use rand::Rng;
 use unicode_width::UnicodeWidthStr;
+
+use crate::git::{CommitMetadata, DiffHunk, FileChange, FileStatus, LineChangeType};
+use crate::syntax::Highlighter;
 
 // Duration multipliers relative to typing speed
 const CURSOR_MOVE_PAUSE: f64 = 0.5; // Cursor movement between lines (base speed)

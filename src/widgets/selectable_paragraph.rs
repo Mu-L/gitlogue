@@ -1,13 +1,11 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     text::Line,
     widgets::{Block, Padding, Widget},
 };
 use unicode_width::UnicodeWidthStr;
-
-use ratatui::style::Color;
 
 /// A paragraph widget that wraps at character boundaries and supports line selection
 pub struct SelectableParagraph<'a> {

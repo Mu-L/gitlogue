@@ -1,6 +1,5 @@
-use crate::git::{CommitMetadata, LineChangeType};
-use crate::theme::Theme;
-use crate::widgets::SelectableParagraph;
+use std::collections::BTreeMap;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -8,7 +7,10 @@ use ratatui::{
     widgets::{Block, Padding},
     Frame,
 };
-use std::collections::BTreeMap;
+
+use crate::git::{CommitMetadata, LineChangeType};
+use crate::theme::Theme;
+use crate::widgets::SelectableParagraph;
 
 type FileEntry = (usize, String, String, Color, usize, usize);
 type FileTree = BTreeMap<String, Vec<FileEntry>>;

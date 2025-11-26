@@ -1,3 +1,8 @@
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -12,17 +17,13 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph},
     Frame, Terminal,
 };
-use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 use crate::animation::AnimationEngine;
 use crate::git::{CommitMetadata, GitRepository};
 use crate::panes::{EditorPane, FileTreePane, StatusBarPane, TerminalPane};
 use crate::theme::Theme;
 use crate::PlaybackOrder;
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, PartialEq)]
 enum UIState {

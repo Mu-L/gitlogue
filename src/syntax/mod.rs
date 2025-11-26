@@ -10,37 +10,37 @@ pub use languages::get_language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
-    Keyword,
-    Type,
-    Function,
-    Variable,
-    String,
-    Number,
     Comment,
-    Operator,
-    Punctuation,
     Constant,
+    Function,
+    Keyword,
+    Label,
+    Number,
+    Operator,
     Parameter,
     Property,
-    Label,
+    Punctuation,
+    String,
+    Type,
+    Variable,
 }
 
 impl TokenType {
     pub fn color(&self, theme: &Theme) -> Color {
         match self {
-            TokenType::Keyword => theme.syntax_keyword,
-            TokenType::Type => theme.syntax_type,
-            TokenType::Function => theme.syntax_function,
-            TokenType::Variable => theme.syntax_variable,
-            TokenType::String => theme.syntax_string,
-            TokenType::Number => theme.syntax_number,
             TokenType::Comment => theme.syntax_comment,
-            TokenType::Operator => theme.syntax_operator,
-            TokenType::Punctuation => theme.syntax_punctuation,
             TokenType::Constant => theme.syntax_constant,
+            TokenType::Function => theme.syntax_function,
+            TokenType::Keyword => theme.syntax_keyword,
+            TokenType::Label => theme.syntax_label,
+            TokenType::Number => theme.syntax_number,
+            TokenType::Operator => theme.syntax_operator,
             TokenType::Parameter => theme.syntax_parameter,
             TokenType::Property => theme.syntax_property,
-            TokenType::Label => theme.syntax_label,
+            TokenType::Punctuation => theme.syntax_punctuation,
+            TokenType::String => theme.syntax_string,
+            TokenType::Type => theme.syntax_type,
+            TokenType::Variable => theme.syntax_variable,
         }
     }
 }
@@ -151,44 +151,41 @@ impl Highlighter {
                 let base_name = capture_name.split('.').next().unwrap_or(capture_name);
 
                 let token_type = match base_name {
-                    "keyword" => TokenType::Keyword,
-                    "type" => TokenType::Type,
-                    "function" => TokenType::Function,
-                    "variable" => TokenType::Variable,
-                    "string" => TokenType::String,
-                    "number" => TokenType::Number,
-                    "comment" => TokenType::Comment,
-                    "operator" => TokenType::Operator,
-                    "punctuation" => TokenType::Punctuation,
-                    "constant" => TokenType::Constant,
-                    "parameter" => TokenType::Parameter,
-                    "property" => TokenType::Property,
-                    "label" => TokenType::Label,
-                    "character" => TokenType::String,
-                    "boolean" => TokenType::Constant,
-                    // Additional common capture names
-                    "namespace" | "module" => TokenType::Type,
-                    "constructor" => TokenType::Type,
-                    "method" => TokenType::Function,
-                    "macro" => TokenType::Function,
                     "annotation" | "attribute" | "decorator" => TokenType::Keyword,
-                    "tag" => TokenType::Type,
-                    "escape" => TokenType::Operator,
-                    "delimiter" => TokenType::Punctuation,
-                    "special" => TokenType::Operator,
-                    "field" => TokenType::Property,
-                    "enum" | "struct" | "class" | "interface" | "trait" => TokenType::Type,
-                    "regexp" => TokenType::String,
-                    // Additional from all language queries
-                    "conditional" | "repeat" | "exception" | "include" | "storageclass" => {
+                    "boolean" => TokenType::Constant,
+                    "character" => TokenType::String,
+                    "class" | "constructor" | "enum" | "interface" | "struct" | "trait" => {
+                        TokenType::Type
+                    }
+                    "comment" => TokenType::Comment,
+                    "conditional" | "exception" | "include" | "repeat" | "storageclass" => {
                         TokenType::Keyword
                     }
-                    "identifier" => TokenType::Variable,
+                    "constant" => TokenType::Constant,
+                    "delimiter" => TokenType::Punctuation,
+                    "escape" => TokenType::Operator,
+                    "field" => TokenType::Property,
                     "float" => TokenType::Number,
-                    // Markdown and documentation
+                    "function" => TokenType::Function,
+                    "identifier" => TokenType::Variable,
+                    "keyword" => TokenType::Keyword,
+                    "label" => TokenType::Label,
+                    "macro" | "method" => TokenType::Function,
+                    "module" | "namespace" => TokenType::Type,
+                    "number" => TokenType::Number,
+                    "operator" => TokenType::Operator,
+                    "parameter" => TokenType::Parameter,
+                    "property" => TokenType::Property,
+                    "punctuation" => TokenType::Punctuation,
+                    "regexp" => TokenType::String,
+                    "special" => TokenType::Operator,
+                    "string" => TokenType::String,
+                    "tag" => TokenType::Type,
                     "text" => TokenType::String,
+                    "type" => TokenType::Type,
+                    "variable" => TokenType::Variable,
                     // Skip internal/special markers
-                    "embedded" | "spell" | "__name__" | "_name" | "_op" | "_type" | "none" => {
+                    "__name__" | "_name" | "_op" | "_type" | "embedded" | "none" | "spell" => {
                         continue
                     }
                     _ => continue,

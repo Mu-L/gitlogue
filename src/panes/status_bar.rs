@@ -1,6 +1,3 @@
-use crate::git::CommitMetadata;
-use crate::theme::Theme;
-use crate::widgets::SelectableParagraph;
 use ratatui::{
     layout::Rect,
     style::Style,
@@ -8,6 +5,10 @@ use ratatui::{
     widgets::{Block, Padding},
     Frame,
 };
+
+use crate::git::CommitMetadata;
+use crate::theme::Theme;
+use crate::widgets::SelectableParagraph;
 
 pub struct StatusBarPane;
 
