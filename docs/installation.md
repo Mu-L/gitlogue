@@ -280,7 +280,7 @@ However, it's generally recommended to use cargo without sudo and ensure your us
 If you see an error like:
 
 ```
-gitlogue: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by gitlogue)
+gitlogue: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.35' not found (required by gitlogue)
 ```
 
 This means your system's glibc version is older than what the pre-built binary requires.
@@ -290,9 +290,9 @@ This means your system's glibc version is older than what the pre-built binary r
 1. **Upgrade your OS** (Recommended)
 
    The safest way is to upgrade to a newer version of your Linux distribution:
-   - Ubuntu 24.04+ includes glibc 2.39
-   - Debian 13 (Trixie)+ includes glibc 2.38+
-   - Fedora 39+ includes glibc 2.38+
+   - Ubuntu 22.04+ includes glibc 2.35
+   - Debian 12 (Bookworm)+ includes glibc 2.36
+   - Fedora 36+ includes glibc 2.35+
 
 2. **Build from source**
 

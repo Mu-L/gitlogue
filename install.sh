@@ -14,7 +14,7 @@ check_glibc_version() {
     fi
 
     GLIBC_VERSION=$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    REQUIRED_VERSION="2.39"
+    REQUIRED_VERSION="2.35"
 
     if [ -n "$GLIBC_VERSION" ]; then
         if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$GLIBC_VERSION" | sort -V | head -n1)" != "$REQUIRED_VERSION" ]; then
