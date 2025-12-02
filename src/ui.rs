@@ -32,6 +32,7 @@ enum UIState {
     Finished,
 }
 
+/// Main UI controller for the gitlogue terminal interface.
 pub struct UI<'a> {
     state: UIState,
     speed_ms: u64,
@@ -50,6 +51,7 @@ pub struct UI<'a> {
 }
 
 impl<'a> UI<'a> {
+    /// Creates a new UI instance with the specified configuration.
     pub fn new(
         speed_ms: u64,
         repo: Option<&'a GitRepository>,
@@ -101,11 +103,13 @@ impl<'a> UI<'a> {
         .expect("Error setting Ctrl-C handler");
     }
 
+    /// Loads a commit and starts the animation.
     pub fn load_commit(&mut self, metadata: CommitMetadata) {
         self.engine.load_commit(&metadata);
         self.state = UIState::Playing;
     }
 
+    /// Runs the main UI event loop.
     pub fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();

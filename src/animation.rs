@@ -81,6 +81,7 @@ pub struct EditorBuffer {
 }
 
 impl EditorBuffer {
+    /// Creates a new empty editor buffer with default values.
     pub fn new() -> Self {
         Self {
             lines: vec![String::new()],
@@ -97,6 +98,7 @@ impl EditorBuffer {
         }
     }
 
+    /// Creates an editor buffer initialized with the given content.
     pub fn from_content(content: &str) -> Self {
         let lines: Vec<String> = if content.is_empty() {
             vec![String::new()]
@@ -119,6 +121,7 @@ impl EditorBuffer {
         }
     }
 
+    /// Inserts a character at the specified line and column position.
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
         if line >= self.lines.len() {
             self.lines.resize(line + 1, String::new());
@@ -135,6 +138,7 @@ impl EditorBuffer {
         line_str.insert(byte_idx, ch);
     }
 
+    /// Inserts a new line with the given content at the specified position.
     pub fn insert_line(&mut self, line: usize, content: String) {
         if line > self.lines.len() {
             self.lines.resize(line, String::new());
@@ -142,6 +146,7 @@ impl EditorBuffer {
         self.lines.insert(line, content);
     }
 
+    /// Deletes the line at the specified position.
     pub fn delete_line(&mut self, line: usize) {
         if line < self.lines.len() {
             self.lines.remove(line);
@@ -251,6 +256,7 @@ pub struct AnimationEngine {
 }
 
 impl AnimationEngine {
+    /// Creates a new animation engine with the specified typing speed.
     pub fn new(speed_ms: u64) -> Self {
         let target_fps: u64 = 120;
         let frame_interval_ms = 1000 / target_fps;
@@ -302,10 +308,12 @@ impl AnimationEngine {
         self.base_speed_ms
     }
 
+    /// Sets the viewport height for scroll calculations.
     pub fn set_viewport_height(&mut self, height: usize) {
         self.viewport_height = height;
     }
 
+    /// Sets the content width for line wrapping calculations.
     pub fn set_content_width(&mut self, width: usize) {
         self.content_width = width;
     }
@@ -802,7 +810,7 @@ impl AnimationEngine {
         (cursor_line, buffer_line)
     }
 
-    /// Update animation state and return true if display needs refresh
+    /// Updates animation state and returns true if display needs refresh.
     pub fn tick(&mut self) -> bool {
         self.update_cursor_blink();
 
@@ -1101,6 +1109,7 @@ impl AnimationEngine {
         self.buffer.scroll_offset = logical_offset;
     }
 
+    /// Returns true if the animation has completed.
     pub fn is_finished(&self) -> bool {
         self.state == AnimationState::Finished
     }

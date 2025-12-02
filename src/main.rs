@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use theme::Theme;
 use ui::UI;
 
+/// Defines the order in which commits are played back during animation.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum PlaybackOrder {
     #[default]
@@ -169,6 +170,7 @@ pub enum ThemeCommands {
 }
 
 impl Args {
+    /// Validates the command-line arguments and returns the Git repository path.
     pub fn validate(&self) -> Result<PathBuf> {
         let start_path = self.path.clone().unwrap_or_else(|| PathBuf::from("."));
 
