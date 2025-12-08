@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2025-12-08
+
+### ✨ Features
+
+- feat(theme): add Telemetry theme ([2270d72](https://github.com/unhappychoice/gitlogue/commit/2270d72))
+- feat: add speed_rules support in config file ([5f1621f](https://github.com/unhappychoice/gitlogue/commit/5f1621f))
+- feat: add file-specific speed rules with --speed-rule option ([d8ba787](https://github.com/unhappychoice/gitlogue/commit/d8ba787))
+
+### 🐛 Bug Fixes
+
+- fix: allow sub-base-speed pauses to work correctly ([5e3a6ef](https://github.com/unhappychoice/gitlogue/commit/5e3a6ef))
+- fix: apply speed rules to all pause durations ([4a008e6](https://github.com/unhappychoice/gitlogue/commit/4a008e6))
+
+### 📝 Other Changes
+
+- chore: bump version to v0.6.0 ([320d778](https://github.com/unhappychoice/gitlogue/commit/320d778))
+- docs: add telemetry theme to themes documentation ([bb5ebbe](https://github.com/unhappychoice/gitlogue/commit/bb5ebbe))
+- chore(deps): bump git2 from 0.20.2 to 0.20.3 ([28cb068](https://github.com/unhappychoice/gitlogue/commit/28cb068))
+- chore(deps): bump toml_edit from 0.23.7 to 0.23.9 ([d12df6a](https://github.com/unhappychoice/gitlogue/commit/d12df6a))
+- style: fix fmt and clippy warnings ([1d594d6](https://github.com/unhappychoice/gitlogue/commit/1d594d6))
+- docs: add speed-rule documentation ([63092ce](https://github.com/unhappychoice/gitlogue/commit/63092ce))
+- chore(deps): bump tree-sitter-bash from 0.25.0 to 0.25.1 ([ce09a6a](https://github.com/unhappychoice/gitlogue/commit/ce09a6a))
+- docs: add docstrings to improve coverage ([4007761](https://github.com/unhappychoice/gitlogue/commit/4007761))
+- chore: update flake.nix hashes for v0.5.0 ([8e7173b](https://github.com/unhappychoice/gitlogue/commit/8e7173b))
+
+
 ## [0.5.0] - 2025-11-30
 
 ### ✨ Features
@@ -26,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📝 Other Changes
 
-- chore: bump version to v0.5.0 ([d85784e](https://github.com/unhappychoice/gitlogue/commit/d85784e))
+- chore: bump version to v0.5.0 ([907efec](https://github.com/unhappychoice/gitlogue/commit/907efec))
 - docs: update supported languages list ([6708fe9](https://github.com/unhappychoice/gitlogue/commit/6708fe9))
 - Update README to reflect new brew instructions (#111) ([bcb19f8](https://github.com/unhappychoice/gitlogue/commit/bcb19f8))
 - refactor: sort use statements consistently across files ([6f212b9](https://github.com/unhappychoice/gitlogue/commit/6f212b9))
