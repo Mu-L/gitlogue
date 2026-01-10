@@ -89,7 +89,7 @@ impl Theme {
             "telemetry" => Ok(themes::telemetry()),
             "tokyo-night" => Ok(themes::tokyo_night()),
             _ => Err(anyhow::anyhow!("Unknown theme: {}", name))
-                .context("Available themes: ayu-dark, catppuccin, dracula, everforest, github-dark, gruvbox, material, monokai, night-owl, nord, one-dark, rose-pine, solarized-dark, solarized-light, telemetry, tokyo-night"),
+                .context("Available themes: ayu-dark, catppuccin, dracula, everforest, fluorite, github-dark, gruvbox, material, monokai, night-owl, nord, one-dark, rose-pine, solarized-dark, solarized-light, telemetry, tokyo-night"),
         }
     }
 
@@ -106,8 +106,8 @@ impl Theme {
             "ayu-dark",
             "catppuccin",
             "dracula",
-            "fluorite",
             "everforest",
+            "fluorite",
             "github-dark",
             "gruvbox",
             "material",

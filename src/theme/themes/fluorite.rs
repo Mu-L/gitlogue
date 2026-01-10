@@ -1,5 +1,5 @@
 use super::super::Theme;
-use ratatui::style:: Color;
+use ratatui::style::Color;
 
 /// Fluorite - Elegant dark theme with purple and pink tones
 /// Soft and sophisticated color scheme inspired by the mineral fluorite
@@ -40,18 +40,18 @@ pub fn fluorite() -> Theme {
 
         separator: Color::Rgb(42, 28, 54),
 
-        syntax_keyword: Color:: Rgb(222, 127, 236),
+        syntax_keyword: Color::Rgb(222, 127, 236),
         syntax_type: Color::Rgb(173, 133, 245),
         syntax_function: Color::Rgb(139, 203, 255),
         syntax_variable: Color::Rgb(215, 215, 215),
         syntax_string: Color::Rgb(139, 215, 137),
         syntax_number: Color::Rgb(209, 123, 159),
-        syntax_comment: Color:: Rgb(91, 60, 117),
-        syntax_operator: Color:: Rgb(110, 155, 188),
-        syntax_punctuation: Color:: Rgb(110, 155, 188),
+        syntax_comment: Color::Rgb(91, 60, 117),
+        syntax_operator: Color::Rgb(110, 155, 188),
+        syntax_punctuation: Color::Rgb(110, 155, 188),
         syntax_constant: Color::Rgb(209, 123, 159),
         syntax_parameter: Color::Rgb(173, 133, 245),
-        syntax_property: Color:: Rgb(139, 215, 137),
+        syntax_property: Color::Rgb(139, 215, 137),
         syntax_label: Color::Rgb(222, 127, 236),
     }
 }
