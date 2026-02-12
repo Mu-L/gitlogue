@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-02-12
+
+### 🐛 Bug Fixes
+
+- fix: address CodeRabbit review issues ([a8a9208](https://github.com/unhappychoice/gitlogue/commit/a8a9208))
+- fix: clear dialog area before rendering to prevent text bleed-through ([75c1266](https://github.com/unhappychoice/gitlogue/commit/75c1266))
+
+### 📝 Other Changes
+
+- chore: bump version to v0.8.0 ([24a4265](https://github.com/unhappychoice/gitlogue/commit/24a4265))
+- refactor: improve playback controls UX ([d8bff84](https://github.com/unhappychoice/gitlogue/commit/d8bff84))
+- added playback controlls ([2506b99](https://github.com/unhappychoice/gitlogue/commit/2506b99))
+- chore(deps): bump rand from 0.9.2 to 0.10.0 (#147) ([4c951d8](https://github.com/unhappychoice/gitlogue/commit/4c951d8))
+- chore(deps): bump toml from 0.9.12+spec-1.1.0 to 1.0.0+spec-1.1.0 ([d6bdbfe](https://github.com/unhappychoice/gitlogue/commit/d6bdbfe))
+- chore(deps): bump clap from 4.5.57 to 4.5.58 ([11a9b36](https://github.com/unhappychoice/gitlogue/commit/11a9b36))
+- chore(deps): bump toml_edit from 0.24.1+spec-1.1.0 to 0.25.0+spec-1.1.0 ([c3e6793](https://github.com/unhappychoice/gitlogue/commit/c3e6793))
+- chore(deps): bump toml from 0.9.11+spec-1.1.0 to 0.9.12+spec-1.1.0 ([c3b9514](https://github.com/unhappychoice/gitlogue/commit/c3b9514))
+- chore(deps): bump toml_edit from 0.24.0+spec-1.1.0 to 0.24.1+spec-1.1.0 ([6100f9c](https://github.com/unhappychoice/gitlogue/commit/6100f9c))
+- chore(deps): bump ctrlc from 3.5.1 to 3.5.2 ([8636309](https://github.com/unhappychoice/gitlogue/commit/8636309))
+- chore(deps): bump anyhow from 1.0.100 to 1.0.101 ([74edf44](https://github.com/unhappychoice/gitlogue/commit/74edf44))
+- chore(deps): bump clap from 4.5.56 to 4.5.57 ([a6cc996](https://github.com/unhappychoice/gitlogue/commit/a6cc996))
+- chore(deps): bump git2 from 0.20.3 to 0.20.4 ([02689a7](https://github.com/unhappychoice/gitlogue/commit/02689a7))
+- chore(deps): bump clap from 4.5.54 to 4.5.56 ([de1279e](https://github.com/unhappychoice/gitlogue/commit/de1279e))
+- chore(deps): bump unicode-width from 0.2.0 to 0.2.2 ([e2b4adb](https://github.com/unhappychoice/gitlogue/commit/e2b4adb))
+- chore: update flake.nix hashes for v0.7.0 ([9154fe1](https://github.com/unhappychoice/gitlogue/commit/9154fe1))
+
+
 ## [0.7.0] - 2026-01-16
 
 ### ✨ Features
@@ -21,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 📝 Other Changes
 
-- chore: bump version to v0.7.0 ([8d1df29](https://github.com/unhappychoice/gitlogue/commit/8d1df29))
+- chore: bump version to v0.7.0 ([c7ff630](https://github.com/unhappychoice/gitlogue/commit/c7ff630))
 - chore(deps): bump chrono from 0.4.42 to 0.4.43 ([7ec94ad](https://github.com/unhappychoice/gitlogue/commit/7ec94ad))
 - chore(deps): bump toml from 0.9.10+spec-1.1.0 to 0.9.11+spec-1.1.0 ([b79396f](https://github.com/unhappychoice/gitlogue/commit/b79396f))
 - chore(deps): bump tree-sitter-md from 0.5.1 to 0.5.2 ([45b031e](https://github.com/unhappychoice/gitlogue/commit/45b031e))
