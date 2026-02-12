@@ -361,8 +361,13 @@ gitlogue diff -i "*.lock" -i "dist/**"
 
 While gitlogue is running:
 
-- `Esc` - Quit the application
+- `Esc` - Open menu (Key Bindings / About / Exit)
+- `q` - Quit the application
 - `Ctrl+C` - Quit the application
+- `Space` - Play / Pause
+- `h` / `l` - Step line back / forward
+- `H` / `L` - Step change back / forward
+- `p` / `n` - Previous / Next commit
 
 ## Use Cases
 

@@ -24,7 +24,7 @@ impl StatusBarPane {
             .style(Style::default().bg(theme.background_left))
             .padding(Padding::vertical(1));
 
-        let status_text = if let Some(meta) = metadata {
+        let status_lines = if let Some(meta) = metadata {
             let is_working_tree = meta.hash == "working-tree";
             let hash_display = if is_working_tree {
                 "working"
@@ -70,7 +70,7 @@ impl StatusBarPane {
             )])]
         };
 
-        let content = SelectableParagraph::new(status_text)
+        let content = SelectableParagraph::new(status_lines)
             .block(block)
             .background_style(Style::default().bg(theme.background_left))
             .padding(Padding::horizontal(2));

@@ -14,12 +14,12 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Padding, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph},
     Frame, Terminal,
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::animation::{AnimationEngine, SpeedRule};
+use crate::animation::{AnimationEngine, SpeedRule, StepMode};
 use crate::git::{CommitMetadata, DiffMode, GitRepository};
 use crate::panes::{EditorPane, FileTreePane, StatusBarPane, TerminalPane};
 use crate::theme::Theme;
@@ -29,7 +29,16 @@ use crate::PlaybackOrder;
 enum UIState {
     Playing,
     WaitingForNext { resume_at: Instant },
+    Menu,
+    KeyBindings,
+    About,
     Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PlaybackState {
+    Playing,
+    Paused,
 }
 
 /// Main UI controller for the gitlogue terminal interface.
@@ -49,6 +58,11 @@ pub struct UI<'a> {
     commit_spec: Option<String>,
     is_range_mode: bool,
     diff_mode: Option<DiffMode>,
+    playback_state: PlaybackState,
+    history: Vec<CommitMetadata>,
+    history_index: Option<usize>,
+    menu_index: usize,
+    prev_state: Option<Box<UIState>>,
 }
 
 impl<'a> UI<'a> {
@@ -86,12 +100,39 @@ impl<'a> UI<'a> {
             commit_spec,
             is_range_mode,
             diff_mode: None,
+            playback_state: PlaybackState::Playing,
+            history: Vec::new(),
+            history_index: None,
+            menu_index: 0,
+            prev_state: None,
         }
     }
 
     /// Sets the diff mode for working tree diff playback.
     pub fn set_diff_mode(&mut self, mode: Option<DiffMode>) {
         self.diff_mode = mode;
+    }
+
+    fn open_menu(&mut self) {
+        self.prev_state = Some(Box::new(self.state.clone()));
+        self.menu_index = 0;
+        self.state = UIState::Menu;
+        self.engine.pause();
+    }
+
+    fn close_menu(&mut self) {
+        let restored = self
+            .prev_state
+            .take()
+            .map(|s| *s)
+            .unwrap_or(UIState::Playing);
+        self.state = match restored {
+            UIState::WaitingForNext { .. } => UIState::Playing,
+            other => other,
+        };
+        if self.playback_state == PlaybackState::Playing {
+            self.engine.resume();
+        }
     }
 
     fn setup_signal_handler(should_exit: Arc<AtomicBool>) {
@@ -113,8 +154,174 @@ impl<'a> UI<'a> {
 
     /// Loads a commit and starts the animation.
     pub fn load_commit(&mut self, metadata: CommitMetadata) {
+        self.play_commit(metadata, true);
+    }
+
+    fn play_commit(&mut self, metadata: CommitMetadata, record_history: bool) {
+        if record_history {
+            self.record_history(&metadata);
+        }
         self.engine.load_commit(&metadata);
+        match self.playback_state {
+            PlaybackState::Playing => self.engine.resume(),
+            PlaybackState::Paused => self.engine.pause(),
+        }
         self.state = UIState::Playing;
+    }
+
+    fn record_history(&mut self, metadata: &CommitMetadata) {
+        if let Some(index) = self.history_index {
+            if index + 1 < self.history.len() {
+                self.history.truncate(index + 1);
+            }
+        } else {
+            self.history.clear();
+        }
+
+        self.history.push(metadata.clone());
+        self.history_index = Some(self.history.len() - 1);
+    }
+
+    fn play_history_commit(&mut self, index: usize) -> bool {
+        if let Some(metadata) = self.history.get(index).cloned() {
+            self.history_index = Some(index);
+            self.play_commit(metadata, false);
+            return true;
+        }
+
+        false
+    }
+
+    fn toggle_pause(&mut self) {
+        match self.playback_state {
+            PlaybackState::Playing => {
+                self.playback_state = PlaybackState::Paused;
+                self.engine.pause();
+            }
+            PlaybackState::Paused => {
+                self.playback_state = PlaybackState::Playing;
+                self.engine.resume();
+            }
+        }
+    }
+
+    fn ensure_manual_pause(&mut self) {
+        if self.playback_state != PlaybackState::Paused {
+            self.playback_state = PlaybackState::Paused;
+            self.engine.pause();
+        }
+    }
+
+    fn step_line(&mut self) {
+        self.ensure_manual_pause();
+        let _ = self.engine.manual_step(StepMode::Line);
+    }
+
+    fn step_change(&mut self) {
+        self.ensure_manual_pause();
+        let _ = self.engine.manual_step(StepMode::Change);
+    }
+
+    fn step_line_back(&mut self) {
+        self.ensure_manual_pause();
+        let _ = self.engine.restore_line_checkpoint();
+    }
+
+    fn step_change_back(&mut self) {
+        self.ensure_manual_pause();
+        let _ = self.engine.restore_change_checkpoint();
+    }
+
+    fn handle_prev(&mut self) {
+        if let Some(index) = self.history_index {
+            if index > 0 {
+                let target = index - 1;
+                self.play_history_commit(target);
+            }
+        }
+    }
+
+    fn handle_next(&mut self) {
+        if let Some(index) = self.history_index {
+            if index + 1 < self.history.len() {
+                let target = index + 1;
+                if self.play_history_commit(target) {
+                    return;
+                }
+            }
+        }
+
+        if self.repo.is_none() && self.diff_mode.is_none() {
+            return;
+        }
+
+        self.advance_to_next_commit();
+    }
+
+    fn advance_to_next_commit(&mut self) -> bool {
+        if let Some(diff_mode) = self.diff_mode {
+            if let Some(repo) = self.repo {
+                match repo.get_working_tree_diff(diff_mode) {
+                    Ok(metadata) if !metadata.changes.is_empty() => {
+                        self.load_commit(metadata);
+                        return true;
+                    }
+                    _ => {
+                        self.state = UIState::Finished;
+                        return false;
+                    }
+                }
+            }
+            self.state = UIState::Finished;
+            return false;
+        }
+
+        let Some(repo) = self.repo else {
+            self.state = UIState::Finished;
+            return false;
+        };
+
+        match self.fetch_repo_commit(repo) {
+            Ok(metadata) => {
+                self.load_commit(metadata);
+                true
+            }
+            Err(_) => {
+                if self.loop_playback {
+                    repo.reset_index();
+                    if let Ok(metadata) = self.fetch_repo_commit(repo) {
+                        self.load_commit(metadata);
+                        true
+                    } else {
+                        self.state = UIState::Finished;
+                        false
+                    }
+                } else {
+                    self.state = UIState::Finished;
+                    false
+                }
+            }
+        }
+    }
+
+    fn fetch_repo_commit(&self, repo: &GitRepository) -> Result<CommitMetadata> {
+        if self.is_range_mode {
+            return match self.order {
+                PlaybackOrder::Random => repo.random_range_commit(),
+                PlaybackOrder::Asc => repo.next_range_commit_asc(),
+                PlaybackOrder::Desc => repo.next_range_commit_desc(),
+            };
+        }
+
+        if let Some(spec) = &self.commit_spec {
+            return repo.get_commit(spec);
+        }
+
+        match self.order {
+            PlaybackOrder::Random => repo.random_commit(),
+            PlaybackOrder::Asc => repo.next_asc_commit(),
+            PlaybackOrder::Desc => repo.next_desc_commit(),
+        }
     }
 
     /// Runs the main UI event loop.
@@ -169,14 +376,59 @@ impl<'a> UI<'a> {
             // Poll for keyboard events at frame rate
             if event::poll(std::time::Duration::from_millis(8))? {
                 if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            self.state = UIState::Finished;
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.state = UIState::Finished;
-                        }
-                        _ => {}
+                    match &self.state {
+                        UIState::Menu => match key.code {
+                            KeyCode::Esc => self.close_menu(),
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                self.menu_index = self.menu_index.saturating_sub(1);
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                self.menu_index = (self.menu_index + 1).min(2);
+                            }
+                            KeyCode::Enter => match self.menu_index {
+                                0 => self.state = UIState::KeyBindings,
+                                1 => self.state = UIState::About,
+                                _ => self.state = UIState::Finished,
+                            },
+                            _ => {}
+                        },
+                        UIState::KeyBindings | UIState::About => match key.code {
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                                self.state = UIState::Menu;
+                            }
+                            _ => {}
+                        },
+                        UIState::Finished => match key.code {
+                            KeyCode::Char('q') => {
+                                self.state = UIState::Finished;
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.state = UIState::Finished;
+                            }
+                            _ => {}
+                        },
+                        _ => match key.code {
+                            KeyCode::Esc => self.open_menu(),
+                            KeyCode::Char('q') => {
+                                self.state = UIState::Finished;
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.state = UIState::Finished;
+                            }
+                            KeyCode::Char(' ') => {
+                                self.toggle_pause();
+                            }
+                            KeyCode::Char(ch) => match ch {
+                                'h' => self.step_line_back(),
+                                'l' => self.step_line(),
+                                'H' => self.step_change_back(),
+                                'L' => self.step_change(),
+                                'p' => self.handle_prev(),
+                                'n' => self.handle_next(),
+                                _ => {}
+                            },
+                            _ => {}
+                        },
                     }
                 }
             }
@@ -186,91 +438,26 @@ impl<'a> UI<'a> {
                 UIState::Playing => {
                     if self.engine.is_finished() {
                         if self.repo.is_some() {
-                            // Schedule next commit
-                            // Wait time proportional to speed (100x the typing speed)
                             self.state = UIState::WaitingForNext {
                                 resume_at: Instant::now()
                                     + Duration::from_millis(self.speed_ms * 100),
                             };
                         } else {
-                            // Single commit mode without loop - quit
                             self.state = UIState::Finished;
                         }
                     }
                 }
                 UIState::WaitingForNext { resume_at } => {
                     if Instant::now() >= resume_at {
-                        // Handle diff mode looping
-                        if let Some(diff_mode) = self.diff_mode {
-                            if let Some(repo) = self.repo {
-                                // Refresh the working tree diff
-                                match repo.get_working_tree_diff(diff_mode) {
-                                    Ok(metadata) if !metadata.changes.is_empty() => {
-                                        self.load_commit(metadata);
-                                    }
-                                    _ => {
-                                        // No more changes, finish
-                                        self.state = UIState::Finished;
-                                    }
-                                }
-                            } else {
-                                self.state = UIState::Finished;
-                            }
-                        } else if let Some(repo) = self.repo {
-                            let result = if self.is_range_mode {
-                                match self.order {
-                                    PlaybackOrder::Random => repo.random_range_commit(),
-                                    PlaybackOrder::Asc => repo.next_range_commit_asc(),
-                                    PlaybackOrder::Desc => repo.next_range_commit_desc(),
-                                }
-                            } else if self.commit_spec.is_some() {
-                                repo.get_commit(self.commit_spec.as_ref().unwrap())
-                            } else {
-                                match self.order {
-                                    PlaybackOrder::Random => repo.random_commit(),
-                                    PlaybackOrder::Asc => repo.next_asc_commit(),
-                                    PlaybackOrder::Desc => repo.next_desc_commit(),
-                                }
-                            };
-                            match result {
-                                Ok(metadata) => {
-                                    self.load_commit(metadata);
-                                }
-                                Err(_) => {
-                                    if self.loop_playback {
-                                        repo.reset_index();
-                                        let restart_result = if self.is_range_mode {
-                                            match self.order {
-                                                PlaybackOrder::Random => repo.random_range_commit(),
-                                                PlaybackOrder::Asc => repo.next_range_commit_asc(),
-                                                PlaybackOrder::Desc => {
-                                                    repo.next_range_commit_desc()
-                                                }
-                                            }
-                                        } else {
-                                            match self.order {
-                                                PlaybackOrder::Random => repo.random_commit(),
-                                                PlaybackOrder::Asc => repo.next_asc_commit(),
-                                                PlaybackOrder::Desc => repo.next_desc_commit(),
-                                            }
-                                        };
-                                        match restart_result {
-                                            Ok(metadata) => {
-                                                self.load_commit(metadata);
-                                            }
-                                            Err(_) => {
-                                                self.state = UIState::Finished;
-                                            }
-                                        }
-                                    } else {
-                                        self.state = UIState::Finished;
-                                    }
-                                }
-                            }
-                        } else {
-                            self.state = UIState::Finished;
+                        if matches!(self.playback_state, PlaybackState::Paused) {
+                            continue;
                         }
+
+                        self.advance_to_next_commit();
                     }
+                }
+                UIState::Menu | UIState::KeyBindings | UIState::About => {
+                    // Paused while in menu/dialog
                 }
                 UIState::Finished => {
                     break;
@@ -411,6 +598,126 @@ impl<'a> UI<'a> {
 
             let dialog = Paragraph::new(dialog_text).block(block);
             f.render_widget(dialog, dialog_area);
+        }
+
+        // Render menu / key bindings / about overlays
+        match self.state {
+            UIState::Menu => self.render_menu(f, size),
+            UIState::KeyBindings => self.render_keybindings(f, size),
+            UIState::About => self.render_about(f, size),
+            _ => {}
+        }
+    }
+
+    fn render_menu(&self, f: &mut Frame, size: Rect) {
+        let items = ["Key Bindings", "About", "Exit"];
+        let lines: Vec<Line> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let marker = if i == self.menu_index { "> " } else { "  " };
+                let style = if i == self.menu_index {
+                    Style::default().fg(self.theme.file_tree_current_file_fg)
+                } else {
+                    Style::default().fg(self.theme.status_message)
+                };
+                Line::from(Span::styled(format!("{marker}{item}"), style))
+            })
+            .collect();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Menu (Esc to close) ")
+            .padding(Padding::new(2, 2, 1, 1))
+            .style(
+                Style::default()
+                    .fg(self.theme.file_tree_current_file_fg)
+                    .bg(self.theme.editor_cursor_line_bg),
+            );
+
+        let dialog_width = 30u16;
+        let dialog_height = (items.len() as u16) + 4; // borders + padding
+        let area = Self::centered_rect(size, dialog_width, dialog_height);
+
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_keybindings(&self, f: &mut Frame, size: Rect) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "General",
+                Style::default().fg(self.theme.file_tree_current_file_fg),
+            )),
+            Line::from("  Esc     Menu"),
+            Line::from("  q       Quit"),
+            Line::from("  Ctrl+c  Quit"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Playback Controls",
+                Style::default().fg(self.theme.file_tree_current_file_fg),
+            )),
+            Line::from("  Space   Play / Pause"),
+            Line::from("  h / l   Step line back / forward"),
+            Line::from("  H / L   Step change back / forward"),
+            Line::from("  p / n   Previous / Next commit"),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Key Bindings (Esc to close) ")
+            .padding(Padding::new(2, 2, 1, 1))
+            .style(
+                Style::default()
+                    .fg(self.theme.status_message)
+                    .bg(self.theme.editor_cursor_line_bg),
+            );
+
+        let dialog_height = (lines.len() as u16) + 4;
+        let area = Self::centered_rect(size, 44, dialog_height);
+
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn render_about(&self, f: &mut Frame, size: Rect) {
+        let version = env!("CARGO_PKG_VERSION");
+        let lines = vec![
+            Line::from(Span::styled(
+                "gitlogue",
+                Style::default().fg(self.theme.file_tree_current_file_fg),
+            )),
+            Line::from(format!("Version {version}")),
+            Line::from(""),
+            Line::from("A cinematic Git commit replay tool"),
+            Line::from("for the terminal."),
+            Line::from(""),
+            Line::from("https://github.com/unhappychoice/gitlogue"),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" About (Esc to close) ")
+            .padding(Padding::new(2, 2, 1, 1))
+            .style(
+                Style::default()
+                    .fg(self.theme.status_message)
+                    .bg(self.theme.editor_cursor_line_bg),
+            );
+
+        let dialog_height = (lines.len() as u16) + 4;
+        let area = Self::centered_rect(size, 48, dialog_height);
+
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn centered_rect(outer: Rect, width: u16, height: u16) -> Rect {
+        Rect {
+            x: outer.x + (outer.width.saturating_sub(width)) / 2,
+            y: outer.y + (outer.height.saturating_sub(height)) / 2,
+            width: width.min(outer.width),
+            height: height.min(outer.height),
         }
     }
 }

@@ -95,7 +95,6 @@ impl Config {
             doc["background"] = toml_edit::value(self.background);
             doc["order"] = toml_edit::value(self.order.as_str());
             doc["loop"] = toml_edit::value(self.loop_playback);
-
             // Update ignore_patterns as array
             let mut array = toml_edit::Array::new();
             for pattern in &self.ignore_patterns {

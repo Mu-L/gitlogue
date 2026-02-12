@@ -52,6 +52,7 @@ ignore_patterns = []
 # Speed rules for different file types (pattern:milliseconds)
 # Examples: ["*.java:50", "*.xml:5", "*.rs:30"]
 speed_rules = []
+
 ```
 
 ## Configuration Options
