@@ -121,11 +121,15 @@ impl<'a> UI<'a> {
     }
 
     fn close_menu(&mut self) {
-        if let Some(prev) = self.prev_state.take() {
-            self.state = *prev;
-        } else {
-            self.state = UIState::Playing;
-        }
+        let restored = self
+            .prev_state
+            .take()
+            .map(|s| *s)
+            .unwrap_or(UIState::Playing);
+        self.state = match restored {
+            UIState::WaitingForNext { .. } => UIState::Playing,
+            other => other,
+        };
         if self.playback_state == PlaybackState::Playing {
             self.engine.resume();
         }
@@ -391,6 +395,15 @@ impl<'a> UI<'a> {
                         UIState::KeyBindings | UIState::About => match key.code {
                             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                                 self.state = UIState::Menu;
+                            }
+                            _ => {}
+                        },
+                        UIState::Finished => match key.code {
+                            KeyCode::Char('q') => {
+                                self.state = UIState::Finished;
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.state = UIState::Finished;
                             }
                             _ => {}
                         },

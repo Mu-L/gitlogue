@@ -235,12 +235,17 @@ struct ManualCheckpoint {
     line_offset: isize,
     dialog_title: Option<String>,
     dialog_typing_text: String,
+    speed_ms: u64,
 }
 
 impl ManualCheckpoint {
     fn new(engine: &AnimationEngine) -> Self {
+        let resume_step = engine
+            .current_step
+            .saturating_add(1)
+            .min(engine.steps.len());
         Self {
-            step_index: engine.current_step,
+            step_index: resume_step,
             buffer: engine.buffer.clone(),
             current_file_index: engine.current_file_index,
             current_file_path: engine.current_file_path.clone(),
@@ -249,6 +254,7 @@ impl ManualCheckpoint {
             line_offset: engine.line_offset,
             dialog_title: engine.dialog_title.clone(),
             dialog_typing_text: engine.dialog_typing_text.clone(),
+            speed_ms: engine.speed_ms,
         }
     }
 }
@@ -432,6 +438,7 @@ impl AnimationEngine {
         self.line_offset = snapshot.line_offset;
         self.dialog_title = snapshot.dialog_title;
         self.dialog_typing_text = snapshot.dialog_typing_text;
+        self.speed_ms = snapshot.speed_ms;
         self.pause_until = None;
         self.paused = true;
         self.state = AnimationState::Playing;
