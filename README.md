@@ -216,4 +216,4 @@ ISC License. See [LICENSE](LICENSE) for details.
 
 ## Author
 
-[@unhappychoice](https://github.com/unhappychoice)
+[@unhappychoice](https://unhappychoice.com)
