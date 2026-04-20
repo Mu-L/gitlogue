@@ -17,6 +17,7 @@ pub mod json;
 pub mod kotlin;
 pub mod lua;
 pub mod markdown;
+pub mod nix;
 pub mod php;
 pub mod python;
 pub mod ruby;
@@ -146,6 +147,11 @@ fn by_name(raw: &str) -> Option<LanguageSupport> {
             highlight_query: markdown::HIGHLIGHT_QUERY,
             injection_query: Some(markdown::INJECTION_QUERY),
         }),
+        "nix" => Some(LanguageSupport {
+            language: nix::language(),
+            highlight_query: nix::HIGHLIGHT_QUERY,
+            injection_query: Some(nix::INJECTION_QUERY),
+        }),
         "php" => Some(LanguageSupport {
             language: php::language(),
             highlight_query: php::HIGHLIGHT_QUERY,
@@ -227,6 +233,7 @@ fn canonicalize(raw: &str) -> Option<&'static str> {
         "kt" | "kts" | "kotlin" => Some("kotlin"),
         "lua" => Some("lua"),
         "md" | "markdown" => Some("markdown"),
+        "nix" => Some("nix"),
         "php" | "php3" | "php4" | "php5" | "phtml" => Some("php"),
         "py" | "pyw" | "python" => Some("python"),
         "rb" | "rbw" | "rake" | "gemspec" | "ruby" => Some("ruby"),
