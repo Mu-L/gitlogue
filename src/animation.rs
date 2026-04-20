@@ -477,12 +477,10 @@ impl AnimationEngine {
                 self.record_checkpoint(CheckpointKind::Change);
                 self.record_checkpoint(CheckpointKind::Line);
             }
-            AnimationStep::Pause { multiplier } => {
-                if self.active_pane == ActivePane::Editor {
-                    self.record_checkpoint(CheckpointKind::Line);
-                    if Self::is_change_pause(*multiplier) {
-                        self.record_checkpoint(CheckpointKind::Change);
-                    }
+            AnimationStep::Pause { multiplier } if self.active_pane == ActivePane::Editor => {
+                self.record_checkpoint(CheckpointKind::Line);
+                if Self::is_change_pause(*multiplier) {
+                    self.record_checkpoint(CheckpointKind::Change);
                 }
             }
             _ => {}
