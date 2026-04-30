@@ -1398,3 +1398,87 @@ impl AnimationEngine {
         self.state == AnimationState::Finished
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn speed_rule(rule: &str) -> SpeedRule {
+        SpeedRule::parse(rule).expect("valid speed rule")
+    }
+
+    fn switch_file(path: &str, old_content: &str, new_content: &str) -> AnimationStep {
+        AnimationStep::SwitchFile {
+            file_index: 1,
+            old_content: old_content.to_string(),
+            new_content: new_content.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn speed_rule_uses_last_colon_as_separator() {
+        let rule = speed_rule("docs/v1:guide/*.md:45");
+
+        assert_eq!(rule.speed_ms, 45);
+        assert!(rule.matches("docs/v1:guide/readme.md"));
+        assert!(!rule.matches("docs/v1/guide/readme.md"));
+    }
+
+    #[test]
+    fn speed_rule_rejects_invalid_input() {
+        assert!(SpeedRule::parse("*.rs").is_none());
+        assert!(SpeedRule::parse("*.rs:not-a-number").is_none());
+        assert!(SpeedRule::parse("[*.rs:30").is_none());
+    }
+
+    #[test]
+    fn editor_buffer_inserts_using_character_index() {
+        let mut buffer = EditorBuffer::from_content("a界c");
+
+        buffer.insert_char(0, 2, 'B');
+
+        assert_eq!(buffer.lines, vec!["a界Bc"]);
+    }
+
+    #[test]
+    fn editor_buffer_resizes_and_stays_non_empty() {
+        let mut buffer = EditorBuffer::new();
+
+        buffer.insert_line(2, "tail".to_string());
+        buffer.delete_line(2);
+        buffer.delete_line(1);
+        buffer.delete_line(0);
+
+        assert_eq!(buffer.lines, vec![String::new()]);
+    }
+
+    #[test]
+    fn manual_step_returns_false_when_not_playing() {
+        let mut engine = AnimationEngine::new(30);
+
+        assert!(!engine.manual_step(StepMode::Line));
+        assert_eq!(engine.state, AnimationState::Idle);
+    }
+
+    #[test]
+    fn switch_file_updates_editor_state_and_offsets() {
+        let mut engine = AnimationEngine::new(30);
+        engine.set_speed_rules(vec![speed_rule("src/**/*.rs:5")]);
+        engine.dialog_title = Some("Open File...".to_string());
+        engine.dialog_typing_text = "src/lib.rs".to_string();
+        engine.active_pane = ActivePane::Terminal;
+
+        engine.execute_step(switch_file("src/lib.rs", "old\r\nline", "new\nline"));
+
+        assert_eq!(engine.active_pane, ActivePane::Editor);
+        assert_eq!(engine.current_file_index, 1);
+        assert_eq!(engine.current_file_path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(engine.speed_ms, 5);
+        assert_eq!(engine.buffer.lines, vec!["old", "line"]);
+        assert_eq!(engine.buffer.old_content_line_offsets, vec![0, 5]);
+        assert_eq!(engine.buffer.new_content_line_offsets, vec![0, 4]);
+        assert_eq!(engine.dialog_title, None);
+        assert!(engine.dialog_typing_text.is_empty());
+    }
+}
