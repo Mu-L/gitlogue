@@ -721,3 +721,192 @@ impl<'a> UI<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn metadata(hash: &str, message: &str) -> CommitMetadata {
+        CommitMetadata {
+            hash: hash.to_string(),
+            author: "Author".to_string(),
+            date: DateTime::from_timestamp(1_704_067_200, 0)
+                .unwrap()
+                .with_timezone(&Utc),
+            message: message.to_string(),
+            changes: vec![],
+        }
+    }
+
+    fn test_ui() -> UI<'static> {
+        UI {
+            state: UIState::Playing,
+            speed_ms: 16,
+            file_tree: FileTreePane::new(),
+            editor: EditorPane,
+            terminal: TerminalPane,
+            status_bar: StatusBarPane,
+            engine: AnimationEngine::new(16),
+            repo: None,
+            should_exit: Arc::new(AtomicBool::new(false)),
+            theme: Theme::default(),
+            order: PlaybackOrder::Asc,
+            loop_playback: false,
+            commit_spec: None,
+            is_range_mode: false,
+            diff_mode: None,
+            playback_state: PlaybackState::Playing,
+            history: Vec::new(),
+            history_index: None,
+            menu_index: 0,
+            prev_state: None,
+        }
+    }
+
+    fn render_buffer(ui: &mut UI<'static>, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui.render(f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn load_commit_tracks_history_navigation_and_truncates_future_entries() {
+        let mut ui = test_ui();
+        let first = metadata("1111111", "first");
+        let second = metadata("2222222", "second");
+        let third = metadata("3333333", "third");
+
+        ui.load_commit(first.clone());
+        ui.load_commit(second.clone());
+
+        assert_eq!(ui.state, UIState::Playing);
+        assert_eq!(ui.history_index, Some(1));
+        assert_eq!(
+            ui.history
+                .iter()
+                .map(|item| item.hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1111111", "2222222"]
+        );
+
+        ui.handle_prev();
+        assert_eq!(ui.history_index, Some(0));
+
+        ui.handle_next();
+        assert_eq!(ui.history_index, Some(1));
+
+        ui.handle_prev();
+        ui.load_commit(third);
+        assert_eq!(ui.history_index, Some(1));
+        assert_eq!(
+            ui.history
+                .iter()
+                .map(|item| item.hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1111111", "3333333"]
+        );
+    }
+
+    #[test]
+    fn menu_round_trip_restores_playing_state_from_waiting() {
+        let mut ui = test_ui();
+        ui.state = UIState::WaitingForNext {
+            resume_at: Instant::now() + Duration::from_secs(1),
+        };
+
+        ui.open_menu();
+        assert_eq!(ui.state, UIState::Menu);
+        assert_eq!(ui.menu_index, 0);
+        assert!(matches!(
+            ui.prev_state.as_deref(),
+            Some(UIState::WaitingForNext { .. })
+        ));
+
+        ui.close_menu();
+        assert_eq!(ui.state, UIState::Playing);
+        assert!(ui.prev_state.is_none());
+    }
+
+    #[test]
+    fn toggle_pause_and_manual_pause_update_playback_state() {
+        let mut ui = test_ui();
+
+        ui.toggle_pause();
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+
+        ui.ensure_manual_pause();
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+
+        ui.toggle_pause();
+        assert_eq!(ui.playback_state, PlaybackState::Playing);
+    }
+
+    #[test]
+    fn advance_to_next_commit_without_repo_finishes_ui() {
+        let mut default_ui = test_ui();
+        assert!(!default_ui.advance_to_next_commit());
+        assert_eq!(default_ui.state, UIState::Finished);
+
+        let mut diff_ui = test_ui();
+        diff_ui.set_diff_mode(Some(DiffMode::Staged));
+        assert!(!diff_ui.advance_to_next_commit());
+        assert_eq!(diff_ui.state, UIState::Finished);
+    }
+
+    #[test]
+    fn render_menu_shows_dialog_and_selected_item() {
+        let mut ui = test_ui();
+        ui.state = UIState::Menu;
+        ui.menu_index = 1;
+        ui.engine.dialog_title = Some("Open File...".to_string());
+        ui.engine.dialog_typing_text = "src/ui.rs".to_string();
+
+        let text = buffer_text(&render_buffer(&mut ui, 80, 24));
+
+        assert!(text.contains("Menu (Esc to close)"));
+        assert!(text.contains("> About"));
+        assert!(text.contains("Open File"));
+        assert!(text.contains("src/ui.rs"));
+    }
+
+    #[test]
+    fn render_keybindings_and_about_overlays_include_expected_copy() {
+        let mut keybindings_ui = test_ui();
+        keybindings_ui.state = UIState::KeyBindings;
+        let keybindings = buffer_text(&render_buffer(&mut keybindings_ui, 80, 24));
+
+        assert!(keybindings.contains("Key Bindings (Esc to close)"));
+        assert!(keybindings.contains("h / l   Step line back / forward"));
+        assert!(keybindings.contains("p / n   Previous / Next commit"));
+
+        let mut about_ui = test_ui();
+        about_ui.state = UIState::About;
+        let about = buffer_text(&render_buffer(&mut about_ui, 80, 24));
+
+        assert!(about.contains("About (Esc to close)"));
+        assert!(about.contains("Version 0.8.0"));
+        assert!(about.contains("https://github.com/unhappychoice/gitlogue"));
+    }
+
+    #[test]
+    fn centered_rect_clamps_requested_size_to_outer_area() {
+        let rect = UI::centered_rect(Rect::new(4, 2, 20, 10), 40, 12);
+
+        assert_eq!(rect, Rect::new(4, 2, 20, 10));
+    }
+}
