@@ -123,3 +123,55 @@ impl Theme {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn available_themes_are_unique_and_loadable() {
+        let themes = Theme::available_themes();
+        let unique_themes = themes.iter().copied().collect::<HashSet<_>>();
+
+        assert_eq!(themes.len(), unique_themes.len());
+        assert!(themes.into_iter().all(|name| Theme::load(name).is_ok()));
+    }
+
+    #[test]
+    fn load_returns_helpful_error_for_unknown_theme() {
+        let error = Theme::load("missing-theme")
+            .unwrap_err()
+            .chain()
+            .map(|cause| cause.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            error
+                .first()
+                .is_some_and(|message| message.contains("Available themes:"))
+        );
+        assert!(
+            error
+                .first()
+                .is_some_and(|message| message.contains("tokyo-night"))
+        );
+        assert_eq!(error.get(1), Some(&"Unknown theme: missing-theme".to_string()));
+    }
+
+    #[test]
+    fn transparent_background_only_resets_background_colors() {
+        let original = Theme::load("tokyo-night").unwrap();
+        let transparent = original.clone().with_transparent_background();
+
+        assert_eq!(transparent.background_left, Color::Reset);
+        assert_eq!(transparent.background_right, Color::Reset);
+        assert_eq!(transparent.editor_line_number, original.editor_line_number);
+        assert_eq!(
+            transparent.file_tree_current_file_bg,
+            original.file_tree_current_file_bg
+        );
+        assert_eq!(transparent.terminal_cursor_bg, original.terminal_cursor_bg);
+        assert_eq!(transparent.syntax_keyword, original.syntax_keyword);
+    }
+}
