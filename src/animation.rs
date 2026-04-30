@@ -407,12 +407,13 @@ impl AnimationEngine {
             return false;
         }
         self.line_checkpoints.pop_back();
-        if let Some(snapshot) = self.line_checkpoints.back().cloned() {
-            self.apply_checkpoint(snapshot);
-            true
-        } else {
-            false
-        }
+        let snapshot = self
+            .line_checkpoints
+            .back()
+            .cloned()
+            .expect("line checkpoint should exist after len guard");
+        self.apply_checkpoint(snapshot);
+        true
     }
 
     pub fn restore_change_checkpoint(&mut self) -> bool {
@@ -420,12 +421,13 @@ impl AnimationEngine {
             return false;
         }
         self.change_checkpoints.pop_back();
-        if let Some(snapshot) = self.change_checkpoints.back().cloned() {
-            self.apply_checkpoint(snapshot);
-            true
-        } else {
-            false
-        }
+        let snapshot = self
+            .change_checkpoints
+            .back()
+            .cloned()
+            .expect("change checkpoint should exist after len guard");
+        self.apply_checkpoint(snapshot);
+        true
     }
 
     fn apply_checkpoint(&mut self, snapshot: ManualCheckpoint) {
@@ -1535,6 +1537,18 @@ mod tests {
     }
 
     #[test]
+    fn editor_buffer_insert_char_resizes_missing_lines() {
+        let mut buffer = EditorBuffer::new();
+
+        buffer.insert_char(2, 0, 'x');
+
+        assert_eq!(
+            buffer.lines,
+            vec![String::new(), String::new(), "x".to_string()]
+        );
+    }
+
+    #[test]
     fn editor_buffer_resizes_and_stays_non_empty() {
         let mut buffer = EditorBuffer::new();
 
@@ -1552,6 +1566,15 @@ mod tests {
 
         assert!(!engine.manual_step(StepMode::Line));
         assert_eq!(engine.state, AnimationState::Idle);
+    }
+
+    #[test]
+    fn manual_step_marks_finished_when_no_steps_remain() {
+        let mut engine = AnimationEngine::new(30);
+        engine.state = AnimationState::Playing;
+
+        assert!(!engine.manual_step(StepMode::Change));
+        assert_eq!(engine.state, AnimationState::Finished);
     }
 
     #[test]
@@ -1800,6 +1823,54 @@ mod tests {
     }
 
     #[test]
+    fn record_checkpoint_deduplicates_and_evicts_oldest_snapshots() {
+        let checkpoint_steps = || {
+            (0..=(MAX_LINE_CHECKPOINTS + 2))
+                .map(|_| AnimationStep::TerminalPrompt)
+                .collect::<Vec<_>>()
+        };
+        let mut dedupe_engine = AnimationEngine::new(30);
+        dedupe_engine.steps = checkpoint_steps();
+        dedupe_engine.current_step = 3;
+        dedupe_engine.record_checkpoint(CheckpointKind::Line);
+        dedupe_engine.record_checkpoint(CheckpointKind::Line);
+        dedupe_engine.record_checkpoint(CheckpointKind::Change);
+        dedupe_engine.record_checkpoint(CheckpointKind::Change);
+        assert_eq!(dedupe_engine.line_checkpoints.len(), 1);
+        assert_eq!(dedupe_engine.change_checkpoints.len(), 1);
+
+        let mut line_engine = AnimationEngine::new(30);
+        line_engine.steps = checkpoint_steps();
+        (1..=(MAX_LINE_CHECKPOINTS + 1)).for_each(|step| {
+            line_engine.current_step = step;
+            line_engine.record_checkpoint(CheckpointKind::Line);
+        });
+        assert_eq!(line_engine.line_checkpoints.len(), MAX_LINE_CHECKPOINTS);
+        assert_eq!(
+            line_engine.line_checkpoints.front().map(|c| c.step_index),
+            Some(3)
+        );
+
+        let mut change_engine = AnimationEngine::new(30);
+        change_engine.steps = checkpoint_steps();
+        (1..=(MAX_CHANGE_CHECKPOINTS + 1)).for_each(|step| {
+            change_engine.current_step = step;
+            change_engine.record_checkpoint(CheckpointKind::Change);
+        });
+        assert_eq!(
+            change_engine.change_checkpoints.len(),
+            MAX_CHANGE_CHECKPOINTS
+        );
+        assert_eq!(
+            change_engine
+                .change_checkpoints
+                .front()
+                .map(|c| c.step_index),
+            Some(3)
+        );
+    }
+
+    #[test]
     fn switch_file_uses_default_speed_and_empty_content_fallbacks() {
         let mut engine = AnimationEngine::new(42);
         engine.set_speed_rules(vec![speed_rule("*.rs:5")]);
@@ -2014,6 +2085,25 @@ mod tests {
         assert_eq!(engine.state, AnimationState::Finished);
 
         assert!(!engine.tick());
+    }
+
+    #[test]
+    fn tick_waits_for_next_frame_and_setters_update_dimensions() {
+        let mut engine = AnimationEngine::new(30);
+
+        engine.set_content_width(0);
+        engine.set_viewport_height(7);
+        assert_eq!(engine.content_width, 0);
+        assert_eq!(engine.viewport_height, 7);
+        assert_eq!(engine.calculate_line_display_height("wrapped"), 1);
+
+        engine.state = AnimationState::Playing;
+        engine.frame_interval_ms = 1_000;
+        engine.last_frame = Instant::now();
+        engine.cursor_blink_timer = Instant::now();
+
+        assert!(!engine.tick());
+        assert_eq!(engine.state, AnimationState::Playing);
     }
 
     #[test]
