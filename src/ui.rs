@@ -324,6 +324,81 @@ impl<'a> UI<'a> {
         }
     }
 
+    fn handle_key_event(&mut self, key: event::KeyEvent) {
+        match &self.state {
+            UIState::Menu => self.handle_menu_key(key.code),
+            UIState::KeyBindings | UIState::About => self.handle_overlay_key(key.code),
+            UIState::Finished => self.handle_finished_key(key),
+            _ => self.handle_playback_key(key),
+        }
+    }
+
+    fn handle_menu_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.close_menu(),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.menu_index = self.menu_index.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.menu_index = (self.menu_index + 1).min(2);
+            }
+            KeyCode::Enter => self.select_menu_item(),
+            _ => {}
+        }
+    }
+
+    fn handle_overlay_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.state = UIState::Menu;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_finished_key(&mut self, key: event::KeyEvent) {
+        if Self::is_quit_key(key) {
+            self.state = UIState::Finished;
+        }
+    }
+
+    fn handle_playback_key(&mut self, key: event::KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.open_menu(),
+            KeyCode::Char(' ') => self.toggle_pause(),
+            _ if Self::is_ctrl_c(key) => {
+                self.state = UIState::Finished;
+            }
+            KeyCode::Char(ch) => match ch {
+                'q' => self.state = UIState::Finished,
+                'h' => self.step_line_back(),
+                'l' => self.step_line(),
+                'H' => self.step_change_back(),
+                'L' => self.step_change(),
+                'p' => self.handle_prev(),
+                'n' => self.handle_next(),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn select_menu_item(&mut self) {
+        self.state = match self.menu_index {
+            0 => UIState::KeyBindings,
+            1 => UIState::About,
+            _ => UIState::Finished,
+        };
+    }
+
+    fn is_ctrl_c(key: event::KeyEvent) -> bool {
+        key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+    }
+
+    fn is_quit_key(key: event::KeyEvent) -> bool {
+        matches!(key.code, KeyCode::Char('q')) || Self::is_ctrl_c(key)
+    }
+
     /// Runs the main UI event loop.
     pub fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
@@ -376,60 +451,7 @@ impl<'a> UI<'a> {
             // Poll for keyboard events at frame rate
             if event::poll(std::time::Duration::from_millis(8))? {
                 if let Event::Key(key) = event::read()? {
-                    match &self.state {
-                        UIState::Menu => match key.code {
-                            KeyCode::Esc => self.close_menu(),
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                self.menu_index = self.menu_index.saturating_sub(1);
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                self.menu_index = (self.menu_index + 1).min(2);
-                            }
-                            KeyCode::Enter => match self.menu_index {
-                                0 => self.state = UIState::KeyBindings,
-                                1 => self.state = UIState::About,
-                                _ => self.state = UIState::Finished,
-                            },
-                            _ => {}
-                        },
-                        UIState::KeyBindings | UIState::About => match key.code {
-                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-                                self.state = UIState::Menu;
-                            }
-                            _ => {}
-                        },
-                        UIState::Finished => match key.code {
-                            KeyCode::Char('q') => {
-                                self.state = UIState::Finished;
-                            }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                self.state = UIState::Finished;
-                            }
-                            _ => {}
-                        },
-                        _ => match key.code {
-                            KeyCode::Esc => self.open_menu(),
-                            KeyCode::Char('q') => {
-                                self.state = UIState::Finished;
-                            }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                self.state = UIState::Finished;
-                            }
-                            KeyCode::Char(' ') => {
-                                self.toggle_pause();
-                            }
-                            KeyCode::Char(ch) => match ch {
-                                'h' => self.step_line_back(),
-                                'l' => self.step_line(),
-                                'H' => self.step_change_back(),
-                                'L' => self.step_change(),
-                                'p' => self.handle_prev(),
-                                'n' => self.handle_next(),
-                                _ => {}
-                            },
-                            _ => {}
-                        },
-                    }
+                    self.handle_key_event(key);
                 }
             }
 
@@ -865,6 +887,14 @@ mod tests {
         test_ui_with_repo(None)
     }
 
+    fn ctrl_key_event(ch: char) -> event::KeyEvent {
+        event::KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn key_event(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     fn apply_until_metadata_is_visible(ui: &mut UI<'_>) {
         while ui.engine.current_metadata().is_none() {
             assert!(ui.engine.manual_step(StepMode::Change));
@@ -935,7 +965,7 @@ mod tests {
             resume_at: Instant::now() + Duration::from_secs(1),
         };
 
-        ui.open_menu();
+        ui.handle_key_event(key_event(KeyCode::Esc));
         assert_eq!(ui.state, UIState::Menu);
         assert_eq!(ui.menu_index, 0);
         assert!(matches!(
@@ -943,9 +973,41 @@ mod tests {
             Some(UIState::WaitingForNext { .. })
         ));
 
-        ui.close_menu();
+        ui.handle_key_event(key_event(KeyCode::Esc));
         assert_eq!(ui.state, UIState::Playing);
         assert!(ui.prev_state.is_none());
+    }
+
+    #[test]
+    fn handle_key_event_navigates_menu_and_dialogs() {
+        let mut ui = test_ui();
+        ui.state = UIState::Menu;
+
+        ui.handle_key_event(key_event(KeyCode::Down));
+        ui.handle_key_event(key_event(KeyCode::Char('j')));
+        ui.handle_key_event(key_event(KeyCode::Down));
+        assert_eq!(ui.menu_index, 2);
+
+        ui.handle_key_event(key_event(KeyCode::Up));
+        ui.handle_key_event(key_event(KeyCode::Char('k')));
+        assert_eq!(ui.menu_index, 0);
+
+        ui.handle_key_event(key_event(KeyCode::Enter));
+        assert_eq!(ui.state, UIState::KeyBindings);
+
+        ui.handle_key_event(key_event(KeyCode::Char('q')));
+        assert_eq!(ui.state, UIState::Menu);
+
+        ui.menu_index = 1;
+        ui.handle_key_event(key_event(KeyCode::Enter));
+        assert_eq!(ui.state, UIState::About);
+
+        ui.handle_key_event(key_event(KeyCode::Enter));
+        assert_eq!(ui.state, UIState::Menu);
+
+        ui.menu_index = 2;
+        ui.handle_key_event(key_event(KeyCode::Enter));
+        assert_eq!(ui.state, UIState::Finished);
     }
 
     #[test]
@@ -999,6 +1061,44 @@ mod tests {
 
         assert_eq!(ui.history_index, Some(0));
         assert_eq!(ui.state, UIState::Playing);
+    }
+
+    #[test]
+    fn handle_key_event_maps_playback_shortcuts() {
+        let mut ui = test_ui();
+        ui.load_commit(metadata("1111111", "first"));
+        ui.load_commit(metadata("2222222", "second"));
+
+        ui.handle_key_event(key_event(KeyCode::Char(' ')));
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+
+        ui.handle_key_event(key_event(KeyCode::Char('p')));
+        assert_eq!(ui.history_index, Some(0));
+
+        ui.handle_key_event(key_event(KeyCode::Char('n')));
+        assert_eq!(ui.history_index, Some(1));
+
+        ui.handle_key_event(key_event(KeyCode::Char('l')));
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+
+        ui.handle_key_event(key_event(KeyCode::Esc));
+        assert_eq!(ui.state, UIState::Menu);
+    }
+
+    #[test]
+    fn handle_key_event_quit_shortcuts_finish_ui() {
+        let mut playing_ui = test_ui();
+        playing_ui.handle_key_event(ctrl_key_event('c'));
+        assert_eq!(playing_ui.state, UIState::Finished);
+
+        let mut quit_ui = test_ui();
+        quit_ui.handle_key_event(key_event(KeyCode::Char('q')));
+        assert_eq!(quit_ui.state, UIState::Finished);
+
+        let mut finished_ui = test_ui();
+        finished_ui.state = UIState::Finished;
+        finished_ui.handle_key_event(ctrl_key_event('c'));
+        assert_eq!(finished_ui.state, UIState::Finished);
     }
 
     #[test]
