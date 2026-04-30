@@ -78,3 +78,85 @@ impl StatusBarPane {
         f.render_widget(content, area);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    fn metadata(hash: &str, message: &str) -> CommitMetadata {
+        CommitMetadata {
+            hash: hash.to_string(),
+            author: "Author".to_string(),
+            date: DateTime::from_timestamp(1_704_067_200, 0)
+                .unwrap()
+                .with_timezone(&Utc),
+            message: message.to_string(),
+            changes: vec![],
+        }
+    }
+
+    fn render_buffer(
+        metadata: Option<&CommitMetadata>,
+        theme: &Theme,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| StatusBarPane.render(f, Rect::new(0, 0, width, height), metadata, theme))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_symbols(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn render_shows_placeholder_when_no_commit_is_loaded() {
+        let theme = Theme::default();
+        let buffer = render_buffer(None, &theme, 24, 4);
+
+        assert!(row_symbols(&buffer, 1).contains("No commit loaded"));
+        assert_eq!(buffer[(2, 1)].fg, theme.status_no_commit);
+        assert_eq!(buffer[(0, 1)].bg, theme.background_left);
+    }
+
+    #[test]
+    fn render_formats_regular_commit_with_short_hash_and_date() {
+        let theme = Theme::default();
+        let metadata = metadata("1234567890abcdef", "subject line");
+        let buffer = render_buffer(Some(&metadata), &theme, 32, 6);
+
+        assert!(row_symbols(&buffer, 1).contains("hash: 1234567"));
+        assert!(row_symbols(&buffer, 2).contains("author: Author"));
+        assert!(row_symbols(&buffer, 3).contains("date: 2024-01-01 00:00:00"));
+        assert!(row_symbols(&buffer, 4).contains("subject line"));
+        assert_eq!(buffer[(8, 1)].fg, theme.status_hash);
+        assert_eq!(buffer[(10, 2)].fg, theme.status_author);
+        assert_eq!(buffer[(8, 3)].fg, theme.status_date);
+        assert_eq!(buffer[(2, 4)].fg, theme.status_message);
+    }
+
+    #[test]
+    fn render_working_tree_omits_date_and_skips_blank_message_lines() {
+        let theme = Theme::default();
+        let metadata = metadata("working-tree", "subject line\n\nbody line");
+        let buffer = render_buffer(Some(&metadata), &theme, 32, 6);
+
+        assert!(row_symbols(&buffer, 1).contains("hash: working"));
+        assert!(row_symbols(&buffer, 2).contains("author: Author"));
+        assert!(row_symbols(&buffer, 3).contains("subject line"));
+        assert!(row_symbols(&buffer, 4).contains("body line"));
+        assert!(!row_symbols(&buffer, 3).contains("date:"));
+        assert_eq!(buffer[(8, 1)].fg, theme.status_hash);
+        assert_eq!(buffer[(2, 3)].fg, theme.status_message);
+        assert_eq!(buffer[(2, 4)].fg, theme.status_message);
+    }
+}
