@@ -355,6 +355,14 @@ struct DiffPlaybackPlan {
     runtime: RuntimeOptions,
 }
 
+struct CommitPlaybackPlan {
+    metadata: git::CommitMetadata,
+    runtime: RuntimeOptions,
+    order: PlaybackOrder,
+    is_range_mode: bool,
+    keep_repo_ref: bool,
+}
+
 fn load_theme_with_background(
     cli_theme: Option<&str>,
     cli_background: Option<bool>,
@@ -383,6 +391,65 @@ fn resolve_runtime_options(
         theme: load_theme_with_background(cli_theme, cli_background, config)?,
         loop_playback: cli_loop_playback.unwrap_or(loop_default),
         speed_rules: parse_speed_rules(cli_speed_rules, &config.speed_rules),
+    })
+}
+
+fn has_commit_filters(args: &Args) -> bool {
+    args.author.is_some() || args.before.is_some() || args.after.is_some()
+}
+
+fn apply_commit_filters(repo: &mut GitRepository, args: &Args) -> Result<()> {
+    if args.author.is_some() {
+        repo.set_author_filter(args.author.clone());
+    }
+    if let Some(ref before_str) = args.before {
+        repo.set_before_filter(Some(git::parse_date(before_str)?));
+    }
+    if let Some(ref after_str) = args.after {
+        repo.set_after_filter(Some(git::parse_date(after_str)?));
+    }
+    Ok(())
+}
+
+fn prepare_commit_playback(
+    repo: &mut GitRepository,
+    args: &Args,
+    config: &Config,
+) -> Result<CommitPlaybackPlan> {
+    apply_commit_filters(repo, args)?;
+
+    let is_range_mode = is_range_mode(args.commit.as_deref());
+    let is_filtered = has_commit_filters(args);
+    let patterns = collect_ignore_patterns(
+        &config.ignore_patterns,
+        args.ignore_file.as_deref(),
+        &args.ignore,
+    );
+    git::init_ignore_patterns(&patterns).ok();
+    let order = resolve_order(args.order, &config.order, is_range_mode, is_filtered);
+    let runtime = resolve_runtime_options(
+        args.speed,
+        args.theme.as_deref(),
+        args.background,
+        args.loop_playback,
+        &args.speed_rule,
+        config,
+        config.loop_playback,
+    )?;
+    let metadata = load_initial_commit(repo, args.commit.as_deref(), order)?;
+    let keep_repo_ref = should_keep_repo_ref(
+        is_range_mode,
+        is_filtered,
+        args.commit.is_some(),
+        runtime.loop_playback,
+    );
+
+    Ok(CommitPlaybackPlan {
+        metadata,
+        runtime,
+        order,
+        is_range_mode,
+        keep_repo_ref,
     })
 }
 
@@ -525,67 +592,30 @@ fn main() -> Result<()> {
 
     let repo_path = args.validate()?;
     let mut repo = GitRepository::open(&repo_path)?;
-
-    // Set author filter if specified
-    if args.author.is_some() {
-        repo.set_author_filter(args.author.clone());
-    }
-
-    // Set date filters if specified
-    if let Some(ref before_str) = args.before {
-        let before_date = git::parse_date(before_str)?;
-        repo.set_before_filter(Some(before_date));
-    }
-    if let Some(ref after_str) = args.after {
-        let after_date = git::parse_date(after_str)?;
-        repo.set_after_filter(Some(after_date));
-    }
-
-    let is_commit_specified = args.commit.is_some();
-    let is_range_mode = is_range_mode(args.commit.as_deref());
-    let is_filtered = args.author.is_some() || args.before.is_some() || args.after.is_some();
-
-    // Load config: CLI arguments > config file > defaults
     let config = Config::load()?;
-
-    // Initialize ignore patterns: CLI flags > ignore-file > config
-    let patterns = collect_ignore_patterns(
-        &config.ignore_patterns,
-        args.ignore_file.as_deref(),
-        &args.ignore,
-    );
-    git::init_ignore_patterns(&patterns).ok();
-    let order = resolve_order(args.order, &config.order, is_range_mode, is_filtered);
-    let runtime = resolve_runtime_options(
-        args.speed,
-        args.theme.as_deref(),
-        args.background,
-        args.loop_playback,
-        &args.speed_rule,
-        &config,
-        config.loop_playback,
-    )?;
-
-    let metadata = load_initial_commit(&repo, args.commit.as_deref(), order)?;
-
-    // Create UI with repository reference
-    // Filtered modes (range/author/date) always need repo ref for iteration
-    let repo_ref = should_keep_repo_ref(
-        is_range_mode,
-        is_filtered,
-        is_commit_specified,
-        runtime.loop_playback,
-    )
-    .then_some(&repo);
-    let mut ui = UI::new(
-        runtime.speed,
-        repo_ref,
-        runtime.theme,
+    let CommitPlaybackPlan {
+        metadata,
+        runtime,
         order,
-        runtime.loop_playback,
+        is_range_mode,
+        keep_repo_ref,
+    } = prepare_commit_playback(&mut repo, &args, &config)?;
+    let RuntimeOptions {
+        speed,
+        theme,
+        loop_playback,
+        speed_rules,
+    } = runtime;
+    let repo_ref = keep_repo_ref.then_some(&repo);
+    let mut ui = UI::new(
+        speed,
+        repo_ref,
+        theme,
+        order,
+        loop_playback,
         args.commit.clone(),
         is_range_mode,
-        runtime.speed_rules,
+        speed_rules,
     );
     ui.load_commit(metadata);
     ui.run()?;
@@ -649,6 +679,25 @@ mod tests {
             message: &str,
             timestamp: i64,
         ) -> String {
+            self.commit_file_with_author(
+                relative_path,
+                content,
+                "Test User",
+                "test@example.com",
+                timestamp,
+                message,
+            )
+        }
+
+        fn commit_file_with_author(
+            &self,
+            relative_path: &str,
+            content: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
             let file_path = self.path.join(relative_path);
             file_path
                 .parent()
@@ -664,7 +713,7 @@ mod tests {
             let tree_id = index.write_tree().unwrap();
             let tree = self.repo.find_tree(tree_id).unwrap();
             let signature =
-                Signature::new("Test User", "test@example.com", &Time::new(timestamp, 0)).unwrap();
+                Signature::new(author_name, author_email, &Time::new(timestamp, 0)).unwrap();
             let parent = self
                 .repo
                 .head()
@@ -856,35 +905,81 @@ mod tests {
     }
 
     #[test]
-    fn load_initial_commit_supports_repo_order_hash_and_ranges() {
+    fn load_initial_commit_supports_commit_specs_and_each_playback_order() {
         let test_repo = TestRepo::new();
         let oldest = test_repo.commit_file("history.txt", "one\n", "first", 1_700_000_000);
         let middle = test_repo.commit_file("history.txt", "two\n", "second", 1_700_000_100);
         let newest = test_repo.commit_file("history.txt", "three\n", "third", 1_700_000_200);
-        let repo = GitRepository::open(&test_repo.path).unwrap();
 
         assert_eq!(
-            load_initial_commit(&repo, None, PlaybackOrder::Asc)
-                .unwrap()
-                .hash,
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                None,
+                PlaybackOrder::Asc,
+            )
+            .unwrap()
+            .hash,
             oldest
         );
         assert_eq!(
-            load_initial_commit(&repo, Some(newest.as_str()), PlaybackOrder::Random)
-                .unwrap()
-                .hash,
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                Some(newest.as_str()),
+                PlaybackOrder::Random,
+            )
+            .unwrap()
+            .hash,
             newest
         );
         assert_eq!(
-            load_initial_commit(&repo, Some("HEAD~2..HEAD"), PlaybackOrder::Asc)
-                .unwrap()
-                .hash,
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                Some("HEAD~2..HEAD"),
+                PlaybackOrder::Asc,
+            )
+            .unwrap()
+            .hash,
             middle
         );
         assert_eq!(
-            load_initial_commit(&repo, Some("HEAD~2..HEAD"), PlaybackOrder::Desc)
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                Some("HEAD~2..HEAD"),
+                PlaybackOrder::Desc,
+            )
+            .unwrap()
+            .hash,
+            newest
+        );
+
+        let single_commit_repo = TestRepo::new();
+        let only = single_commit_repo.commit_file("solo.txt", "one\n", "only", 1_700_010_000);
+        let single_repo = GitRepository::open(&single_commit_repo.path).unwrap();
+
+        assert_eq!(
+            load_initial_commit(&single_repo, None, PlaybackOrder::Random)
                 .unwrap()
                 .hash,
+            only
+        );
+        assert_eq!(
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                None,
+                PlaybackOrder::Desc,
+            )
+            .unwrap()
+            .hash,
+            newest
+        );
+        assert_eq!(
+            load_initial_commit(
+                &GitRepository::open(&test_repo.path).unwrap(),
+                Some("HEAD~1..HEAD"),
+                PlaybackOrder::Random,
+            )
+            .unwrap()
+            .hash,
             newest
         );
     }
@@ -953,6 +1048,45 @@ mod tests {
         assert_eq!(saved.theme, "nord");
         assert!(message.contains("Theme set to 'nord'"));
         assert!(message.contains(&temp_home.path.display().to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_commit_playback_applies_filters_and_forces_repo_iteration() -> Result<()> {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file_with_author(
+            "history.txt",
+            "one\n",
+            "Alice",
+            "alice@example.com",
+            1_704_067_200,
+            "first",
+        );
+        let bob = test_repo.commit_file_with_author(
+            "history.txt",
+            "two\n",
+            "Bob",
+            "bob@example.com",
+            1_704_153_600,
+            "second",
+        );
+        let mut repo = GitRepository::open(&test_repo.path)?;
+        let mut args = test_args(None);
+        args.author = Some("BOB@EXAMPLE.COM".to_string());
+        args.after = Some("2024-01-01T12:00:00Z".to_string());
+        args.before = Some("2024-01-02T12:00:00Z".to_string());
+        let mut config = sample_config();
+        config.loop_playback = false;
+
+        let plan = prepare_commit_playback(&mut repo, &args, &config)?;
+
+        assert_eq!(plan.metadata.hash, bob);
+        assert_eq!(plan.order, PlaybackOrder::Asc);
+        assert!(!plan.is_range_mode);
+        assert!(plan.keep_repo_ref);
+        assert_eq!(plan.runtime.speed, 12);
+        assert!(!plan.runtime.loop_playback);
 
         Ok(())
     }
