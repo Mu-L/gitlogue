@@ -726,7 +726,103 @@ impl<'a> UI<'a> {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
+    use git2::{Repository, Signature, Time};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRepo {
+        path: PathBuf,
+        repo: Repository,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let unique_id = format!(
+                "{}_{}_{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, CounterOrdering::SeqCst)
+            );
+            let path = std::env::temp_dir().join(format!("gitlogue_ui_test_{unique_id}"));
+            fs::create_dir_all(&path).unwrap();
+
+            let repo = Repository::init(&path).unwrap();
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test User").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+
+            Self { path, repo }
+        }
+
+        fn write_file(&self, relative_path: &str, content: &str) {
+            let file_path = self.path.join(relative_path);
+            file_path
+                .parent()
+                .map(fs::create_dir_all)
+                .transpose()
+                .unwrap();
+            fs::write(file_path, content).unwrap();
+        }
+
+        fn stage_file(&self, relative_path: &str) {
+            let mut index = self.repo.index().unwrap();
+            index.add_path(Path::new(relative_path)).unwrap();
+            index.write().unwrap();
+        }
+
+        fn commit_file(
+            &self,
+            relative_path: &str,
+            content: &str,
+            message: &str,
+            timestamp: i64,
+        ) -> String {
+            self.write_file(relative_path, content);
+            self.stage_file(relative_path);
+
+            let mut index = self.repo.index().unwrap();
+            let tree_id = index.write_tree().unwrap();
+            let tree = self.repo.find_tree(tree_id).unwrap();
+            let signature =
+                Signature::new("Test User", "test@example.com", &Time::new(timestamp, 0)).unwrap();
+            let parent = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+
+            let oid = match parent.as_ref() {
+                Some(parent_commit) => self.repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[parent_commit],
+                ),
+                None => self
+                    .repo
+                    .commit(Some("HEAD"), &signature, &signature, message, &tree, &[]),
+            }
+            .unwrap();
+
+            oid.to_string()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn metadata(hash: &str, message: &str) -> CommitMetadata {
         CommitMetadata {
@@ -740,7 +836,7 @@ mod tests {
         }
     }
 
-    fn test_ui() -> UI<'static> {
+    fn test_ui_with_repo<'a>(repo: Option<&'a GitRepository>) -> UI<'a> {
         UI {
             state: UIState::Playing,
             speed_ms: 16,
@@ -749,7 +845,7 @@ mod tests {
             terminal: TerminalPane,
             status_bar: StatusBarPane,
             engine: AnimationEngine::new(16),
-            repo: None,
+            repo,
             should_exit: Arc::new(AtomicBool::new(false)),
             theme: Theme::default(),
             order: PlaybackOrder::Asc,
@@ -762,6 +858,16 @@ mod tests {
             history_index: None,
             menu_index: 0,
             prev_state: None,
+        }
+    }
+
+    fn test_ui() -> UI<'static> {
+        test_ui_with_repo(None)
+    }
+
+    fn apply_until_metadata_is_visible(ui: &mut UI<'_>) {
+        while ui.engine.current_metadata().is_none() {
+            assert!(ui.engine.manual_step(StepMode::Change));
         }
     }
 
@@ -857,6 +963,19 @@ mod tests {
     }
 
     #[test]
+    fn step_helpers_pause_playback_without_needing_checkpoints() {
+        let mut ui = test_ui();
+
+        ui.step_line();
+        ui.step_change();
+        ui.step_line_back();
+        ui.step_change_back();
+
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+        assert_eq!(ui.state, UIState::Playing);
+    }
+
+    #[test]
     fn advance_to_next_commit_without_repo_finishes_ui() {
         let mut default_ui = test_ui();
         assert!(!default_ui.advance_to_next_commit());
@@ -866,6 +985,139 @@ mod tests {
         diff_ui.set_diff_mode(Some(DiffMode::Staged));
         assert!(!diff_ui.advance_to_next_commit());
         assert_eq!(diff_ui.state, UIState::Finished);
+    }
+
+    #[test]
+    fn history_navigation_bounds_are_noops_without_targets() {
+        let mut ui = test_ui();
+
+        assert!(!ui.play_history_commit(0));
+
+        ui.load_commit(metadata("1111111", "only"));
+        ui.handle_prev();
+        ui.handle_next();
+
+        assert_eq!(ui.history_index, Some(0));
+        assert_eq!(ui.state, UIState::Playing);
+    }
+
+    #[test]
+    fn advance_to_next_commit_uses_repo_order_and_finishes_after_last_commit() -> Result<()> {
+        let test_repo = TestRepo::new();
+        let first = test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
+        let second = test_repo.commit_file("src/lib.rs", "fn second() {}\n", "second", 2);
+        let repo = GitRepository::open(&test_repo.path)?;
+        let mut ui = test_ui_with_repo(Some(&repo));
+        ui.order = PlaybackOrder::Asc;
+
+        assert!(ui.advance_to_next_commit());
+        assert_eq!(
+            ui.history.last().map(|item| item.hash.as_str()),
+            Some(first.as_str())
+        );
+
+        assert!(ui.advance_to_next_commit());
+        assert_eq!(
+            ui.history.last().map(|item| item.hash.as_str()),
+            Some(second.as_str())
+        );
+
+        assert!(!ui.advance_to_next_commit());
+        assert_eq!(ui.state, UIState::Finished);
+
+        Ok(())
+    }
+
+    #[test]
+    fn advance_to_next_commit_restarts_from_beginning_when_looping() -> Result<()> {
+        let test_repo = TestRepo::new();
+        let only = test_repo.commit_file("src/lib.rs", "fn only() {}\n", "only", 1);
+        let repo = GitRepository::open(&test_repo.path)?;
+        let mut ui = test_ui_with_repo(Some(&repo));
+        ui.order = PlaybackOrder::Desc;
+        ui.loop_playback = true;
+
+        assert!(ui.advance_to_next_commit());
+        assert!(ui.advance_to_next_commit());
+
+        let hashes = ui
+            .history
+            .iter()
+            .map(|item| item.hash.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hashes, vec![only.as_str(), only.as_str()]);
+        assert_eq!(ui.state, UIState::Playing);
+
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_repo_commit_supports_random_commit_specs_and_ranges() -> Result<()> {
+        let test_repo = TestRepo::new();
+        let first = test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
+        let second = test_repo.commit_file("src/lib.rs", "fn second() {}\n", "second", 2);
+        let third = test_repo.commit_file("src/lib.rs", "fn third() {}\n", "third", 3);
+        let repo = GitRepository::open(&test_repo.path)?;
+
+        let mut random_ui = test_ui_with_repo(Some(&repo));
+        random_ui.order = PlaybackOrder::Random;
+        let random_hash = random_ui.fetch_repo_commit(&repo)?.hash;
+        assert!([first.as_str(), second.as_str(), third.as_str()].contains(&random_hash.as_str()));
+
+        let mut commit_ui = test_ui_with_repo(Some(&repo));
+        commit_ui.commit_spec = Some(second.clone());
+        assert_eq!(commit_ui.fetch_repo_commit(&repo)?.hash, second);
+
+        let range = format!("{first}..{third}");
+        repo.set_commit_range(&range)?;
+
+        let mut range_random_ui = test_ui_with_repo(Some(&repo));
+        range_random_ui.is_range_mode = true;
+        range_random_ui.order = PlaybackOrder::Random;
+        let random_hash = range_random_ui.fetch_repo_commit(&repo)?.hash;
+        assert!([second.as_str(), third.as_str()].contains(&random_hash.as_str()));
+
+        repo.set_commit_range(&range)?;
+
+        let mut range_desc_ui = test_ui_with_repo(Some(&repo));
+        range_desc_ui.is_range_mode = true;
+        range_desc_ui.order = PlaybackOrder::Desc;
+        assert_eq!(range_desc_ui.fetch_repo_commit(&repo)?.hash, third);
+
+        Ok(())
+    }
+
+    #[test]
+    fn diff_mode_refreshes_working_tree_and_finishes_when_clean() -> Result<()> {
+        let clean_repo = TestRepo::new();
+        clean_repo.commit_file("src/lib.rs", "fn clean() {}\n", "clean", 1);
+        let clean_git_repo = GitRepository::open(&clean_repo.path)?;
+        let mut clean_ui = test_ui_with_repo(Some(&clean_git_repo));
+        clean_ui.set_diff_mode(Some(DiffMode::Staged));
+
+        assert!(!clean_ui.advance_to_next_commit());
+        assert_eq!(clean_ui.state, UIState::Finished);
+
+        let dirty_repo = TestRepo::new();
+        dirty_repo.commit_file("src/lib.rs", "fn clean() {}\n", "clean", 1);
+        dirty_repo.write_file("src/lib.rs", "fn dirty() {\n    println!(\"hi\");\n}\n");
+        dirty_repo.stage_file("src/lib.rs");
+
+        let dirty_git_repo = GitRepository::open(&dirty_repo.path)?;
+        let mut dirty_ui = test_ui_with_repo(Some(&dirty_git_repo));
+        dirty_ui.set_diff_mode(Some(DiffMode::Staged));
+
+        assert!(dirty_ui.advance_to_next_commit());
+        assert_eq!(
+            dirty_ui
+                .history
+                .last()
+                .map(|item| (item.hash.as_str(), item.message.as_str())),
+            Some(("working-tree", "Staged changes"))
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -908,5 +1160,17 @@ mod tests {
         let rect = UI::centered_rect(Rect::new(4, 2, 20, 10), 40, 12);
 
         assert_eq!(rect, Rect::new(4, 2, 20, 10));
+    }
+
+    #[test]
+    fn render_playing_state_uses_loaded_metadata_for_file_tree_and_status_bar() {
+        let mut ui = test_ui();
+        ui.load_commit(metadata("4444444", "render commit"));
+        apply_until_metadata_is_visible(&mut ui);
+
+        let text = buffer_text(&render_buffer(&mut ui, 80, 40));
+
+        assert!(text.contains("hash: 4444444"));
+        assert!(text.contains("render commit"));
     }
 }
