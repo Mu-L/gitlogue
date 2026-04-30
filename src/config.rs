@@ -13,7 +13,7 @@ pub struct Config {
     pub background: bool,
     #[serde(default = "default_order")]
     pub order: String,
-    #[serde(default = "default_loop")]
+    #[serde(default = "default_loop", rename = "loop", alias = "loop_playback")]
     pub loop_playback: bool,
     #[serde(default = "default_ignore_patterns")]
     pub ignore_patterns: Vec<String>,
@@ -206,5 +206,200 @@ impl Config {
         })?;
 
         Ok(config_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const HOME_VARS: [&str; 4] = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"];
+
+    struct TempHome {
+        _lock: MutexGuard<'static, ()>,
+        path: PathBuf,
+        original_vars: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl TempHome {
+        fn new() -> Result<Self> {
+            let lock = env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let path = env::temp_dir().join(format!(
+                "gitlogue-config-tests-{}-{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+            ));
+
+            fs::create_dir_all(&path)?;
+
+            let original_vars = HOME_VARS
+                .iter()
+                .map(|name| (*name, env::var_os(name)))
+                .collect();
+
+            env::set_var("HOME", &path);
+            env::set_var("USERPROFILE", &path);
+            env::remove_var("HOMEDRIVE");
+            env::remove_var("HOMEPATH");
+
+            Ok(Self {
+                _lock: lock,
+                path,
+                original_vars,
+            })
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            self.original_vars
+                .iter()
+                .for_each(|(name, value)| match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                });
+
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn sample_config() -> Config {
+        Config {
+            theme: "nord".to_string(),
+            speed: 12,
+            background: false,
+            order: "desc".to_string(),
+            loop_playback: true,
+            ignore_patterns: vec!["dist/**".to_string(), "*.png".to_string()],
+            speed_rules: vec!["*.rs:10".to_string(), "*.md:40".to_string()],
+        }
+    }
+
+    fn assert_config_eq(actual: &Config, expected: &Config) {
+        assert_eq!(actual.theme, expected.theme);
+        assert_eq!(actual.speed, expected.speed);
+        assert_eq!(actual.background, expected.background);
+        assert_eq!(actual.order, expected.order);
+        assert_eq!(actual.loop_playback, expected.loop_playback);
+        assert_eq!(actual.ignore_patterns, expected.ignore_patterns);
+        assert_eq!(actual.speed_rules, expected.speed_rules);
+    }
+
+    #[test]
+    fn load_returns_defaults_when_config_file_is_missing() -> Result<()> {
+        let temp_home = TempHome::new()?;
+        let config_path = Config::config_path()?;
+        let config = Config::load()?;
+
+        assert_eq!(
+            config_path,
+            temp_home.path.join(".config/gitlogue/config.toml")
+        );
+        assert!(!config_path.exists());
+        assert_eq!(config.theme, "tokyo-night");
+        assert_eq!(config.speed, 30);
+        assert!(config.background);
+        assert_eq!(config.order, "random");
+        assert!(!config.loop_playback);
+        assert!(config.ignore_patterns.is_empty());
+        assert!(config.speed_rules.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_fills_in_missing_fields_from_defaults() -> Result<()> {
+        let _temp_home = TempHome::new()?;
+        let config_path = Config::config_path()?;
+
+        fs::write(&config_path, "theme = \"rose-pine\"\n")?;
+
+        let config = Config::load()?;
+
+        assert_eq!(config.theme, "rose-pine");
+        assert_eq!(config.speed, 30);
+        assert!(config.background);
+        assert_eq!(config.order, "random");
+        assert!(!config.loop_playback);
+        assert!(config.ignore_patterns.is_empty());
+        assert!(config.speed_rules.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn save_creates_commented_config_and_round_trips_values() -> Result<()> {
+        let _temp_home = TempHome::new()?;
+        let config = sample_config();
+        let config_path = Config::config_path()?;
+
+        config.save()?;
+
+        let contents = fs::read_to_string(&config_path)?;
+
+        assert!(contents.contains("# gitlogue configuration file"));
+        assert!(contents.contains("theme = \"nord\""));
+        assert!(contents.contains("ignore_patterns = [\"dist/**\", \"*.png\"]"));
+        assert!(contents.contains("speed_rules = [\"*.rs:10\", \"*.md:40\"]"));
+
+        let loaded = Config::load()?;
+        assert_config_eq(&loaded, &config);
+
+        Ok(())
+    }
+
+    #[test]
+    fn save_updates_existing_config_without_dropping_comments() -> Result<()> {
+        let _temp_home = TempHome::new()?;
+        let config_path = Config::config_path()?;
+        let config = sample_config();
+
+        fs::write(
+            &config_path,
+            "# top comment\n\
+             theme = \"tokyo-night\"\n\
+             # keep this comment\n\
+             speed = 30\n\
+             background = true\n\
+             order = \"random\"\n\
+             loop = false\n\
+             ignore_patterns = [\"*.tmp\"]\n\
+             speed_rules = [\"*.rs:30\"]\n",
+        )?;
+
+        config.save()?;
+
+        let contents = fs::read_to_string(&config_path)?;
+
+        assert!(contents.contains("# top comment"));
+        assert!(contents.contains("# keep this comment"));
+        assert!(contents.contains("theme = \"nord\""));
+
+        let loaded = Config::load()?;
+        assert_config_eq(&loaded, &config);
+
+        Ok(())
+    }
+
+    #[test]
+    fn themes_dir_is_created_under_the_config_home() -> Result<()> {
+        let temp_home = TempHome::new()?;
+        let themes_dir = Config::themes_dir()?;
+
+        assert_eq!(themes_dir, temp_home.path.join(".config/gitlogue/themes"));
+        assert!(themes_dir.is_dir());
+
+        Ok(())
     }
 }
