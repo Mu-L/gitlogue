@@ -1335,6 +1335,19 @@ mod tests {
         }
     }
 
+    fn large_diff_fixture(label: &str) -> String {
+        (0..2_105)
+            .map(|index| {
+                let marker = if index < 3 || index >= 2_102 {
+                    "context"
+                } else {
+                    label
+                };
+                format!("{marker}-{index:04}-{}\n", "x".repeat(240))
+            })
+            .collect()
+    }
+
     #[test]
     fn test_commit_navigation_respects_order_and_reset() {
         let test_repo = TestRepo::new();
@@ -1837,5 +1850,115 @@ mod tests {
         let now = Utc::now();
         let diff = now.signed_duration_since(result.date);
         assert!(diff.num_seconds() < 60);
+    }
+
+    #[test]
+    fn test_get_commit_omits_oversized_blob_contents_and_keeps_context_lines() {
+        let test_repo = TestRepo::new();
+        let original = large_diff_fixture("before");
+        let updated = large_diff_fixture("after");
+        assert!(original.len() > MAX_BLOB_SIZE);
+        assert!(updated.len() > MAX_BLOB_SIZE);
+
+        test_repo.commit_file(
+            "large.txt",
+            &original,
+            "Alice Example",
+            "alice@example.com",
+            1_700_004_000,
+            "large base",
+        );
+        let updated_hash = test_repo.commit_file(
+            "large.txt",
+            &updated,
+            "Bob Example",
+            "bob@example.com",
+            1_700_004_060,
+            "large update",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let metadata = repo.get_commit(&updated_hash).unwrap();
+        let change = &metadata.changes[0];
+        let context_lines = change
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| matches!(line.change_type, LineChangeType::Context))
+            .count();
+
+        assert_eq!(change.path, "large.txt");
+        assert!(change.old_content.is_none());
+        assert!(change.new_content.is_none());
+        assert!(change.is_excluded);
+        assert!(change
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("too many changes")));
+        assert!(context_lines >= 6);
+    }
+
+    #[test]
+    fn test_working_tree_diff_omits_oversized_index_and_workdir_contents() {
+        let test_repo = TestRepo::new();
+        let large = large_diff_fixture("staged");
+        let updated = large_diff_fixture("workdir");
+        let file = test_repo.path.join("large.txt");
+
+        test_repo.commit_file(
+            "large.txt",
+            "small\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_005_000,
+            "small base",
+        );
+
+        std::fs::write(&file, &large).unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("large.txt")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let staged = repo.get_working_tree_diff(DiffMode::Staged).unwrap();
+        let staged_change = &staged.changes[0];
+        assert_eq!(staged_change.old_content.as_deref(), Some("small\n"));
+        assert!(staged_change.new_content.is_none());
+        assert!(staged_change.is_excluded);
+
+        test_repo.commit_file(
+            "large.txt",
+            &large,
+            "Bob Example",
+            "bob@example.com",
+            1_700_005_060,
+            "large base",
+        );
+
+        std::fs::write(&file, "small again\n").unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("large.txt")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let staged_from_large = repo.get_working_tree_diff(DiffMode::Staged).unwrap();
+        let staged_from_large_change = &staged_from_large.changes[0];
+        assert!(staged_from_large_change.old_content.is_none());
+        assert_eq!(
+            staged_from_large_change.new_content.as_deref(),
+            Some("small again\n")
+        );
+
+        std::fs::write(&file, &updated).unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let unstaged = repo.get_working_tree_diff(DiffMode::Unstaged).unwrap();
+        let unstaged_change = &unstaged.changes[0];
+        assert_eq!(
+            unstaged_change.old_content.as_deref(),
+            Some("small again\n")
+        );
+        assert!(unstaged_change.new_content.is_none());
+        assert!(unstaged_change.is_excluded);
     }
 }
