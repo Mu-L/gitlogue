@@ -528,34 +528,58 @@ impl<'a> UI<'a> {
         Ok(())
     }
 
-    fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    fn update_viewport(&mut self, size: Rect) {
+        // Editor area: 70% (right column) × 80% (editor pane) = 56% of total height
+        let viewport_height = (size.height as f32 * 0.70 * 0.80) as usize;
+        // Editor width: 70% (right column)
+        let content_width = (size.width as f32 * 0.70) as usize;
+        self.engine.set_viewport_height(viewport_height);
+        self.engine.set_content_width(content_width);
+    }
+
+    fn handle_pending_event<Poll, Read>(&mut self, poll: &mut Poll, read: &mut Read) -> Result<()>
+    where
+        Poll: FnMut(Duration) -> io::Result<bool>,
+        Read: FnMut() -> io::Result<Event>,
+    {
+        if poll(Duration::from_millis(8))? {
+            self.handle_event(read()?);
+        }
+        Ok(())
+    }
+
+    fn run_loop_with<B, Poll, Read, Now>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        mut poll: Poll,
+        mut read: Read,
+        mut now: Now,
+    ) -> Result<()>
+    where
+        B: Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+        Poll: FnMut(Duration) -> io::Result<bool>,
+        Read: FnMut() -> io::Result<Event>,
+        Now: FnMut() -> Instant,
+    {
         loop {
             self.sync_exit_state();
 
-            // Update viewport dimensions for scroll calculation
-            let size = terminal.size()?;
-            // Editor area: 70% (right column) × 80% (editor pane) = 56% of total height
-            let viewport_height = (size.height as f32 * 0.70 * 0.80) as usize;
-            // Editor width: 70% (right column)
-            let content_width = (size.width as f32 * 0.70) as usize;
-            self.engine.set_viewport_height(viewport_height);
-            self.engine.set_content_width(content_width);
-
-            // Tick the animation engine
+            self.update_viewport(terminal.size()?.into());
             let needs_redraw = self.engine.tick();
             self.draw_if_needed(terminal, needs_redraw)?;
+            self.handle_pending_event(&mut poll, &mut read)?;
 
-            // Poll for keyboard events at frame rate
-            if event::poll(std::time::Duration::from_millis(8))? {
-                self.handle_event(event::read()?);
-            }
-
-            if !self.advance_state_after_tick(Instant::now()) {
+            if !self.advance_state_after_tick(now()) {
                 break;
             }
         }
 
         Ok(())
+    }
+
+    fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        self.run_loop_with(terminal, event::poll, event::read, Instant::now)
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -968,6 +992,10 @@ mod tests {
         event::KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn quit_event() -> io::Result<Event> {
+        Ok(Event::Key(key_event(KeyCode::Char('q'))))
+    }
+
     #[derive(Clone)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -1170,6 +1198,112 @@ mod tests {
         let mut quit_ui = test_ui();
         quit_ui.handle_event(Event::Key(key_event(KeyCode::Char('q'))));
         assert_eq!(quit_ui.state, UIState::Finished);
+    }
+
+    #[test]
+    fn handle_pending_event_reads_input_only_when_poll_reports_ready() {
+        let mut idle_ui = test_ui();
+        let idle_polls = Cell::new(0);
+        idle_ui
+            .handle_pending_event(
+                &mut |duration| {
+                    idle_polls.set(idle_polls.get() + 1);
+                    assert_eq!(duration, Duration::from_millis(8));
+                    Ok(false)
+                },
+                &mut quit_event,
+            )
+            .unwrap();
+        assert_eq!(idle_polls.get(), 1);
+        assert_eq!(idle_ui.state, UIState::Playing);
+
+        let mut ready_ui = test_ui();
+        let ready_polls = Cell::new(0);
+        let reads = Cell::new(0);
+        ready_ui
+            .handle_pending_event(
+                &mut |duration| {
+                    ready_polls.set(ready_polls.get() + 1);
+                    assert_eq!(duration, Duration::from_millis(8));
+                    Ok(true)
+                },
+                &mut || {
+                    reads.set(reads.get() + 1);
+                    quit_event()
+                },
+            )
+            .unwrap();
+        assert_eq!(ready_polls.get(), 1);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(ready_ui.state, UIState::Finished);
+    }
+
+    #[test]
+    fn run_loop_with_breaks_when_state_advance_requests_exit() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut finished_ui = test_ui();
+        finished_ui.state = UIState::Finished;
+        let idle_polls = Cell::new(0);
+        finished_ui
+            .run_loop_with(
+                &mut terminal,
+                |duration| {
+                    idle_polls.set(idle_polls.get() + 1);
+                    assert_eq!(duration, Duration::from_millis(8));
+                    Ok(false)
+                },
+                quit_event,
+                Instant::now,
+            )
+            .unwrap();
+        assert_eq!(idle_polls.get(), 1);
+
+        let mut quitting_ui = test_ui();
+        let ready_polls = Cell::new(0);
+        let reads = Cell::new(0);
+        quitting_ui
+            .run_loop_with(
+                &mut terminal,
+                |duration| {
+                    ready_polls.set(ready_polls.get() + 1);
+                    assert_eq!(duration, Duration::from_millis(8));
+                    Ok(true)
+                },
+                || {
+                    reads.set(reads.get() + 1);
+                    quit_event()
+                },
+                Instant::now,
+            )
+            .unwrap();
+        assert_eq!(ready_polls.get(), 1);
+        assert_eq!(reads.get(), 1);
+        assert_eq!(quitting_ui.state, UIState::Finished);
+
+        let mut looping_ui = test_ui();
+        let loop_polls = Cell::new(0);
+        let loop_reads = Cell::new(0);
+        looping_ui
+            .run_loop_with(
+                &mut terminal,
+                |duration| {
+                    let next = loop_polls.get() + 1;
+                    loop_polls.set(next);
+                    assert_eq!(duration, Duration::from_millis(8));
+                    Ok(next > 1)
+                },
+                || {
+                    loop_reads.set(loop_reads.get() + 1);
+                    quit_event()
+                },
+                Instant::now,
+            )
+            .unwrap();
+        assert_eq!(loop_polls.get(), 2);
+        assert_eq!(loop_reads.get(), 1);
+        assert_eq!(looping_ui.state, UIState::Finished);
     }
 
     #[test]
