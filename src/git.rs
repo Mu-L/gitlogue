@@ -1408,10 +1408,10 @@ mod tests {
     fn large_diff_fixture(label: &str) -> String {
         (0..2_105)
             .map(|index| {
-                let marker = if index < 3 || index >= 2_102 {
-                    "context"
-                } else {
+                let marker = if (3..2_102).contains(&index) {
                     label
+                } else {
+                    "context"
                 };
                 format!("{marker}-{index:04}-{}\n", "x".repeat(240))
             })

@@ -1664,7 +1664,7 @@ mod tests {
         let about = buffer_text(&render_buffer(&mut about_ui, 80, 24));
 
         assert!(about.contains("About (Esc to close)"));
-        assert!(about.contains("Version 0.8.0"));
+        assert!(about.contains(&format!("Version {}", env!("CARGO_PKG_VERSION"))));
         assert!(about.contains("https://github.com/unhappychoice/gitlogue"));
     }
 
