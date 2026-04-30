@@ -374,4 +374,37 @@ mod tests {
         assert_eq!(buffer[(0, 1)].bg, theme.background_left);
         assert_eq!(buffer[(0, 2)].bg, theme.file_tree_current_file_bg);
     }
+
+    #[test]
+    fn set_commit_metadata_reuses_cached_lines_when_cache_key_matches() {
+        let theme = Theme::default();
+        let mut alternate_theme = theme.clone();
+        alternate_theme.file_tree_modified = Color::Yellow;
+        let metadata = metadata(vec![file_change("file.rs", FileStatus::Modified, &[])]);
+        let mut pane = FileTreePane::new();
+
+        pane.set_commit_metadata(&metadata, 0, &theme);
+        pane.set_commit_metadata(&metadata, 0, &alternate_theme);
+
+        assert_eq!(
+            pane.cached_lines[0].spans[1].style.fg,
+            Some(theme.file_tree_modified)
+        );
+        assert_ne!(
+            pane.cached_lines[0].spans[1].style.fg,
+            Some(alternate_theme.file_tree_modified)
+        );
+    }
+
+    #[test]
+    fn build_tree_lines_falls_back_to_default_marker_for_non_standard_statuses() {
+        let theme = Theme::default();
+        let metadata = metadata(vec![file_change("copy.rs", FileStatus::Copied, &[])]);
+
+        let (lines, current_line_index) = FileTreePane::build_tree_lines(&metadata, 0, &theme);
+
+        assert_eq!(current_line_index, Some(0));
+        assert_eq!(lines[0].to_string(), "  copy.rs +0 -0");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.file_tree_default));
+    }
 }

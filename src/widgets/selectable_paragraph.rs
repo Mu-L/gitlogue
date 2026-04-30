@@ -548,6 +548,21 @@ mod tests {
     }
 
     #[test]
+    fn render_fills_remaining_space_on_wrapped_first_line() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("a界界")])
+                .background_style(Style::default().bg(Color::Red))
+                .padding(Padding::horizontal(1)),
+            5,
+            2,
+        );
+
+        assert_eq!(buffer[(0, 0)].bg, Color::Red);
+        assert_eq!(buffer[(4, 0)].symbol(), " ");
+        assert_eq!(buffer[(4, 0)].bg, Color::Red);
+    }
+
+    #[test]
     fn render_scrolls_selected_wrapped_line_and_applies_selected_style() {
         let buffer = render_paragraph(
             SelectableParagraph::new(vec![

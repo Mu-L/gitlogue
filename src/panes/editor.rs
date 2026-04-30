@@ -301,6 +301,12 @@ mod tests {
             .join("")
     }
 
+    fn has_selected_row_background(buffer: &Buffer, selected_bg: Color) -> bool {
+        (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].bg))
+            .any(|bg| bg == selected_bg)
+    }
+
     #[test]
     fn render_shows_scrolled_highlighted_lines_and_selected_row_background() {
         let theme = Theme::default();
@@ -398,5 +404,31 @@ mod tests {
         assert_eq!(line.spans[3].style.fg, Some(theme.editor_cursor_char_fg));
         assert_eq!(line.spans[3].style.bg, Some(theme.editor_cursor_char_bg));
         assert!(line.spans[3].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_does_not_select_rows_when_cursor_is_outside_visible_window() {
+        let theme = Theme::default();
+        let mut above_scroll = AnimationEngine::new(16);
+        above_scroll.buffer.lines = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        above_scroll.buffer.scroll_offset = 1;
+        above_scroll.buffer.cursor_line = 0;
+
+        let above_scroll_buffer = render_buffer(&above_scroll, &theme, 16, 4);
+        assert!(!has_selected_row_background(
+            &above_scroll_buffer,
+            theme.editor_cursor_line_bg
+        ));
+
+        let mut below_viewport = AnimationEngine::new(16);
+        below_viewport.buffer.lines =
+            vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        below_viewport.buffer.cursor_line = 2;
+
+        let below_viewport_buffer = render_buffer(&below_viewport, &theme, 16, 4);
+        assert!(!has_selected_row_background(
+            &below_viewport_buffer,
+            theme.editor_cursor_line_bg
+        ));
     }
 }
