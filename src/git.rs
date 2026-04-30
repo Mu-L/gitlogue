@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use chrono_english::{parse_date_string, Dialect};
-use git2::{Commit as Git2Commit, Delta, DiffOptions, Oid, Repository};
+use git2::{Commit as Git2Commit, Delta, DiffFindOptions, DiffOptions, Oid, Repository};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rand::RngExt;
 use std::cell::RefCell;
@@ -171,6 +171,15 @@ fn matches_date_filter(
     }
 
     Ok(true)
+}
+
+fn detect_file_moves(diff: &mut git2::Diff, for_untracked: bool) {
+    let mut options = DiffFindOptions::new();
+    options.renames(true);
+    if for_untracked {
+        options.for_untracked(true);
+    }
+    let _ = diff.find_similar(Some(&mut options));
 }
 
 pub struct GitRepository {
@@ -603,7 +612,7 @@ impl GitRepository {
         let mut diff_opts = DiffOptions::new();
         diff_opts.context_lines(3);
 
-        let diff = match repo.diff_tree_to_tree(
+        let mut diff = match repo.diff_tree_to_tree(
             parent_tree.as_ref(),
             Some(&commit_tree),
             Some(&mut diff_opts),
@@ -611,6 +620,7 @@ impl GitRepository {
             Ok(d) => d,
             Err(_) => return Ok(Vec::new()), // Skip if diff fails
         };
+        detect_file_moves(&mut diff, false);
 
         let mut changes = Vec::new();
 
@@ -816,10 +826,11 @@ impl GitRepository {
         let mut diff_opts = DiffOptions::new();
         diff_opts.context_lines(3);
 
-        let diff = self
+        let mut diff = self
             .repo
             .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut diff_opts))
             .context("Failed to diff tree to index")?;
+        detect_file_moves(&mut diff, false);
 
         self.extract_changes_from_diff(&diff, head_tree.as_ref(), None)
     }
@@ -835,10 +846,11 @@ impl GitRepository {
         diff_opts.context_lines(3);
         diff_opts.include_untracked(true);
 
-        let diff = self
+        let mut diff = self
             .repo
             .diff_index_to_workdir(Some(&index), Some(&mut diff_opts))
             .context("Failed to diff index to workdir")?;
+        detect_file_moves(&mut diff, true);
 
         // For unstaged, "old" content comes from index, "new" from workdir
         self.extract_changes_from_diff_workdir(&diff, &index)
@@ -1360,6 +1372,35 @@ mod tests {
                 .remove_path(std::path::Path::new(relative_path))
                 .unwrap();
             index.write().unwrap();
+            self.commit_index(author_name, author_email, timestamp, message)
+        }
+
+        fn stage_rename(&self, from: &str, to: &str) {
+            let from_path = self.path.join(from);
+            let to_path = self.path.join(to);
+            to_path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .unwrap();
+            std::fs::rename(from_path, &to_path).unwrap();
+
+            let mut index = self.repo.index().unwrap();
+            index.remove_path(std::path::Path::new(from)).unwrap();
+            index.add_path(std::path::Path::new(to)).unwrap();
+            index.write().unwrap();
+        }
+
+        fn rename_file(
+            &self,
+            from: &str,
+            to: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            self.stage_rename(from, to);
             self.commit_index(author_name, author_email, timestamp, message)
         }
     }
@@ -2040,6 +2081,68 @@ mod tests {
         assert_eq!(deleted_change.status, FileStatus::Deleted);
         assert_eq!(deleted_change.old_content.as_deref(), Some("tracked\n"));
         assert!(deleted_change.new_content.is_none());
+    }
+
+    #[test]
+    fn test_get_commit_detects_renamed_files_and_keeps_old_path() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/original.rs",
+            "pub fn renamed() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_500,
+            "base commit",
+        );
+        let renamed_hash = test_repo.rename_file(
+            "src/original.rs",
+            "src/renamed.rs",
+            "Bob Example",
+            "bob@example.com",
+            1_700_006_560,
+            "rename file",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_commit(&renamed_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "src/renamed.rs")
+            .unwrap();
+
+        assert_eq!(change.status, FileStatus::Renamed);
+        assert_eq!(change.old_path.as_deref(), Some("src/original.rs"));
+        assert_eq!(change.old_content.as_deref(), Some("pub fn renamed() {}\n"));
+        assert_eq!(change.new_content.as_deref(), Some("pub fn renamed() {}\n"));
+    }
+
+    #[test]
+    fn test_working_tree_diff_detects_staged_renames() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/original.rs",
+            "pub fn renamed() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_620,
+            "base commit",
+        );
+        test_repo.stage_rename("src/original.rs", "src/renamed.rs");
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_working_tree_diff(DiffMode::Staged)
+            .unwrap()
+            .changes[0]
+            .clone();
+
+        assert_eq!(change.status, FileStatus::Renamed);
+        assert_eq!(change.path, "src/renamed.rs");
+        assert_eq!(change.old_path.as_deref(), Some("src/original.rs"));
+        assert_eq!(change.old_content.as_deref(), Some("pub fn renamed() {}\n"));
+        assert_eq!(change.new_content.as_deref(), Some("pub fn renamed() {}\n"));
     }
 
     #[test]
