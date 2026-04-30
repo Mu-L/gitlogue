@@ -114,10 +114,15 @@ impl Highlighter {
     }
 
     pub fn set_language_from_path(&mut self, path: &str) -> bool {
-        self.clear_language();
         let Some(support) = get_language(Path::new(path)) else {
+            self.clear_language();
             return false;
         };
+        self.set_language_support(support)
+    }
+
+    fn set_language_support(&mut self, support: LanguageSupport) -> bool {
+        self.clear_language();
         if self.parser.set_language(&support.language).is_err() {
             return false;
         }
@@ -447,6 +452,27 @@ mod tests {
     }
 
     #[test]
+    fn set_language_support_rejects_invalid_queries_after_clearing_cached_state() {
+        let rust = get_language_by_name("rust").unwrap();
+        let invalid_support = LanguageSupport {
+            language: rust.language,
+            highlight_query: "(",
+            injection_query: None,
+        };
+        let mut highlighter = Highlighter::new();
+
+        assert!(highlighter.set_language_from_path("main.rs"));
+        assert!(!highlighter.highlight("fn main() {}\n").is_empty());
+        assert!(highlighter.cached_tree.is_some());
+
+        assert!(!highlighter.set_language_support(invalid_support));
+        assert!(highlighter.language.is_none());
+        assert!(highlighter.highlight_query.is_none());
+        assert!(highlighter.cached_tree.is_none());
+        assert!(highlighter.cached_source.is_empty());
+    }
+
+    #[test]
     fn default_highlighter_keeps_repeated_highlights_stable() {
         let source = "fn main() { let answer = 42; }\n";
         let mut highlighter = Highlighter::default();
@@ -465,6 +491,25 @@ mod tests {
             second_tree.root_node().to_sexp()
         );
         assert_eq!(highlighter.cached_source, source);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn highlight_returns_empty_when_parser_is_cancelled() {
+        let mut highlighter = Highlighter::new();
+        let source = "fn main() {}\n".repeat(50_000);
+        let cancellation_flag = std::sync::atomic::AtomicUsize::new(1);
+
+        assert!(highlighter.set_language_from_path("main.rs"));
+        unsafe {
+            highlighter
+                .parser
+                .set_cancellation_flag(Some(&cancellation_flag));
+        }
+
+        assert!(highlighter.highlight(&source).is_empty());
+        assert!(highlighter.cached_tree.is_none());
+        assert!(highlighter.cached_source.is_empty());
     }
 
     #[test]
