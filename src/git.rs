@@ -1213,6 +1213,34 @@ mod tests {
         assert_eq!(mode, DiffMode::Staged);
     }
 
+    #[test]
+    fn test_file_status_mappings_cover_remaining_variants() {
+        let status_pairs = [
+            (FileStatus::Added, "A"),
+            (FileStatus::Deleted, "D"),
+            (FileStatus::Modified, "M"),
+            (FileStatus::Renamed, "R"),
+            (FileStatus::Copied, "C"),
+            (FileStatus::Unmodified, "U"),
+        ];
+        assert!(status_pairs
+            .iter()
+            .all(|(status, symbol)| status.as_str() == *symbol));
+
+        let delta_pairs = [
+            (Delta::Added, FileStatus::Added),
+            (Delta::Deleted, FileStatus::Deleted),
+            (Delta::Modified, FileStatus::Modified),
+            (Delta::Renamed, FileStatus::Renamed),
+            (Delta::Copied, FileStatus::Copied),
+            (Delta::Unmodified, FileStatus::Unmodified),
+            (Delta::Typechange, FileStatus::Modified),
+        ];
+        assert!(delta_pairs
+            .iter()
+            .all(|(delta, status)| FileStatus::from(*delta) == status.clone()));
+    }
+
     // RAII guard for temporary git repository - auto-cleans on drop
     struct TestRepo {
         path: std::path::PathBuf,
@@ -1433,6 +1461,7 @@ mod tests {
         desc_repo.set_commit_range("HEAD~2..HEAD").unwrap();
         assert_eq!(desc_repo.next_range_commit_desc().unwrap().hash, newest);
         assert_eq!(desc_repo.next_range_commit_desc().unwrap().hash, middle);
+        assert!(desc_repo.next_range_commit_desc().is_err());
 
         let random_repo = GitRepository::open(&test_repo.path).unwrap();
         random_repo.set_commit_range("HEAD~2..HEAD").unwrap();
@@ -1442,6 +1471,91 @@ mod tests {
         let invalid_repo = GitRepository::open(&test_repo.path).unwrap();
         assert!(invalid_repo.set_commit_range("HEAD...HEAD").is_err());
         assert!(invalid_repo.set_commit_range("HEAD").is_err());
+    }
+
+    #[test]
+    fn test_commit_range_supports_open_ended_and_defensive_cases() {
+        let test_repo = TestRepo::new();
+        let oldest = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn oldest() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_003_000,
+            "oldest",
+        );
+        let middle = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn middle() {}\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_003_060,
+            "middle",
+        );
+        let newest = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn newest() {}\n",
+            "Carol Example",
+            "carol@example.com",
+            1_700_003_120,
+            "newest",
+        );
+
+        let full_range_repo = GitRepository::open(&test_repo.path).unwrap();
+        full_range_repo.set_commit_range("..HEAD").unwrap();
+        let hashes = (0..3)
+            .map(|_| full_range_repo.next_range_commit_asc().unwrap().hash)
+            .collect::<Vec<_>>();
+        assert_eq!(hashes, vec![oldest, middle.clone(), newest.clone()]);
+
+        let tail_repo = GitRepository::open(&test_repo.path).unwrap();
+        tail_repo.set_commit_range("HEAD~1..").unwrap();
+        assert_eq!(tail_repo.next_range_commit_asc().unwrap().hash, newest);
+        assert!(tail_repo.next_range_commit_asc().is_err());
+
+        let invalid_repo = GitRepository::open(&test_repo.path).unwrap();
+        let error = invalid_repo
+            .set_commit_range("HEAD..HEAD..HEAD")
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid range format"));
+
+        let empty_range_repo = GitRepository::open(&test_repo.path).unwrap();
+        *empty_range_repo.commit_range.borrow_mut() = Some(vec![]);
+        assert!(empty_range_repo
+            .next_range_commit_asc()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+        assert!(empty_range_repo
+            .next_range_commit_desc()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+        assert!(empty_range_repo
+            .random_range_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+    }
+
+    #[test]
+    fn test_commit_navigation_defensive_guards_reject_empty_cache() {
+        let test_repo = TestRepo::new();
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+
+        *repo.commit_cache.borrow_mut() = Some(vec![]);
+        assert!(repo
+            .next_asc_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No non-merge commits found"));
+
+        *repo.commit_cache.borrow_mut() = Some(vec![]);
+        assert!(repo
+            .next_desc_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No non-merge commits found"));
     }
 
     #[test]
