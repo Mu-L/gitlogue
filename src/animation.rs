@@ -1402,6 +1402,7 @@ impl AnimationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     fn speed_rule(rule: &str) -> SpeedRule {
         SpeedRule::parse(rule).expect("valid speed rule")
@@ -1414,6 +1415,98 @@ mod tests {
             new_content: new_content.to_string(),
             path: path.to_string(),
         }
+    }
+
+    fn line_change(change_type: LineChangeType, content: &str) -> crate::git::LineChange {
+        crate::git::LineChange {
+            change_type,
+            content: content.to_string(),
+            old_line_no: None,
+            new_line_no: None,
+        }
+    }
+
+    fn hunk(old_start: usize, lines: Vec<crate::git::LineChange>) -> DiffHunk {
+        DiffHunk {
+            old_start,
+            old_lines: lines.len(),
+            new_start: old_start,
+            new_lines: lines.len(),
+            lines,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn file_change(
+        path: &str,
+        old_path: Option<&str>,
+        status: FileStatus,
+        is_excluded: bool,
+        exclusion_reason: Option<&str>,
+        old_content: Option<&str>,
+        new_content: Option<&str>,
+        hunks: Vec<DiffHunk>,
+    ) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            old_path: old_path.map(str::to_string),
+            status,
+            is_binary: false,
+            is_excluded,
+            exclusion_reason: exclusion_reason.map(str::to_string),
+            old_content: old_content.map(str::to_string),
+            new_content: new_content.map(str::to_string),
+            hunks,
+            diff: String::new(),
+        }
+    }
+
+    fn metadata(hash: &str, message: &str, changes: Vec<FileChange>) -> CommitMetadata {
+        CommitMetadata {
+            hash: hash.to_string(),
+            author: "Author".to_string(),
+            date: DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            message: message.to_string(),
+            changes,
+        }
+    }
+
+    fn terminal_commands(steps: &[AnimationStep]) -> Vec<String> {
+        let (mut commands, current) = steps.iter().fold(
+            (Vec::new(), None::<String>),
+            |(mut commands, current), step| match step {
+                AnimationStep::TerminalPrompt => {
+                    if let Some(command) = current {
+                        commands.push(command);
+                    }
+                    (commands, Some(String::new()))
+                }
+                AnimationStep::TerminalTypeChar { ch } => {
+                    let mut command = current.unwrap_or_default();
+                    command.push(*ch);
+                    (commands, Some(command))
+                }
+                _ => (commands, current),
+            },
+        );
+
+        if let Some(command) = current {
+            commands.push(command);
+        }
+
+        commands
+    }
+
+    fn terminal_outputs(steps: &[AnimationStep]) -> Vec<String> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::TerminalOutput { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1480,5 +1573,229 @@ mod tests {
         assert_eq!(engine.buffer.new_content_line_offsets, vec![0, 4]);
         assert_eq!(engine.dialog_title, None);
         assert!(engine.dialog_typing_text.is_empty());
+    }
+
+    #[test]
+    fn load_commit_generates_special_file_sequences_for_regular_commits() {
+        let mut engine = AnimationEngine::new(30);
+        let commit = metadata(
+            "abcdef1234567890",
+            "Refine animation\n\nbody",
+            vec![
+                file_change(
+                    "Cargo.lock",
+                    None,
+                    FileStatus::Modified,
+                    true,
+                    Some("lock file"),
+                    Some("old"),
+                    Some("new"),
+                    vec![],
+                ),
+                file_change(
+                    "src/deleted.rs",
+                    None,
+                    FileStatus::Deleted,
+                    false,
+                    None,
+                    Some("obsolete();\n"),
+                    None,
+                    vec![],
+                ),
+                file_change(
+                    "src/renamed.rs",
+                    Some("src/original.rs"),
+                    FileStatus::Renamed,
+                    false,
+                    None,
+                    Some("before\n"),
+                    Some("after\n"),
+                    vec![],
+                ),
+                file_change(
+                    "src/lib.rs",
+                    None,
+                    FileStatus::Modified,
+                    false,
+                    None,
+                    Some("fn main() {\n}\n"),
+                    Some("fn main() {\n    println!(\"hi\");\n}\n"),
+                    vec![hunk(
+                        1,
+                        vec![
+                            line_change(LineChangeType::Context, "fn main() {"),
+                            line_change(LineChangeType::Addition, "    println!(\"hi\");"),
+                            line_change(LineChangeType::Context, "}"),
+                        ],
+                    )],
+                ),
+            ],
+        );
+
+        engine.load_commit(&commit);
+
+        let commands = terminal_commands(&engine.steps);
+        let outputs = terminal_outputs(&engine.steps);
+        let switched_paths = engine
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::SwitchFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            commands,
+            vec![
+                "time-travel 2024-01-02 03:04:05".to_string(),
+                "rm src/deleted.rs".to_string(),
+                "git add src/deleted.rs".to_string(),
+                "git add src/lib.rs".to_string(),
+                "mv src/original.rs src/renamed.rs".to_string(),
+                "git add src/renamed.rs".to_string(),
+                "git commit -m \"Refine animation\"".to_string(),
+                "git push origin main".to_string(),
+            ]
+        );
+        assert_eq!(
+            switched_paths,
+            vec![
+                "Cargo.lock".to_string(),
+                "src/deleted.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "src/renamed.rs".to_string(),
+            ]
+        );
+        assert_eq!(
+            engine
+                .steps
+                .iter()
+                .filter(|step| matches!(step, AnimationStep::OpenFileDialogStart))
+                .count(),
+            1
+        );
+        assert!(engine.steps.iter().any(|step| {
+            matches!(
+                step,
+                AnimationStep::InsertLine { line, content }
+                    if *line == 1 && content == "    "
+            )
+        }));
+        assert!(outputs
+            .iter()
+            .any(|text| text.contains("Cargo.lock (skipped - lock file)")));
+        assert!(outputs
+            .iter()
+            .any(|text| text.contains("Location: commit abcdef1 by Author")));
+        assert!(outputs.iter().any(|text| text.contains("Refine animation")));
+        assert!(outputs.iter().any(|text| text.contains("✨ SUCCESS")));
+        assert!(
+            matches!(engine.pending_metadata.as_ref(), Some(pending) if pending.hash == commit.hash)
+        );
+        assert_eq!(engine.buffer.lines, vec![String::new()]);
+    }
+
+    #[test]
+    fn load_commit_uses_working_tree_intro_without_commit_or_push_commands() {
+        let mut engine = AnimationEngine::new(30);
+        let diff = metadata(
+            "working-tree",
+            "Staged changes",
+            vec![file_change(
+                "src/draft.rs",
+                None,
+                FileStatus::Modified,
+                false,
+                None,
+                Some("fn main() {}\n"),
+                Some("fn main() {\n    println!(\"draft\");\n}\n"),
+                vec![hunk(
+                    1,
+                    vec![
+                        line_change(LineChangeType::Context, "fn main() {"),
+                        line_change(LineChangeType::Addition, "    println!(\"draft\");"),
+                        line_change(LineChangeType::Context, "}"),
+                    ],
+                )],
+            )],
+        );
+
+        engine.load_commit(&diff);
+
+        let commands = terminal_commands(&engine.steps);
+        let outputs = terminal_outputs(&engine.steps);
+
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("git diff --stat")
+        );
+        assert!(commands
+            .iter()
+            .any(|command| command == "git add src/draft.rs"));
+        assert!(!commands
+            .iter()
+            .any(|command| command.starts_with("git commit -m")));
+        assert!(!commands
+            .iter()
+            .any(|command| command == "git push origin main"));
+        assert!(outputs.iter().any(|text| text == "📝 Staged changes"));
+        assert!(outputs.iter().any(|text| text == "📁 1 file changed"));
+    }
+
+    #[test]
+    fn manual_step_records_and_restores_line_and_change_checkpoints() {
+        let mut engine = AnimationEngine::new(30);
+        engine.state = AnimationState::Playing;
+        engine.steps = vec![
+            AnimationStep::ResetState,
+            switch_file("src/lib.rs", "seed", "seed!\nbranch"),
+            AnimationStep::InsertChar {
+                line: 0,
+                col: 4,
+                ch: '!',
+            },
+            AnimationStep::Pause {
+                multiplier: INSERT_LINE_PAUSE,
+            },
+            AnimationStep::InsertLine {
+                line: 1,
+                content: "branch".to_string(),
+            },
+            AnimationStep::Pause {
+                multiplier: HUNK_PAUSE,
+            },
+        ];
+
+        assert!(engine.manual_step(StepMode::Line));
+        assert!(engine.manual_step(StepMode::Change));
+        assert_eq!(engine.buffer.lines, vec!["seed".to_string()]);
+
+        assert!(engine.manual_step(StepMode::Line));
+        assert_eq!(engine.buffer.lines, vec!["seed!".to_string()]);
+        assert_eq!(engine.line_checkpoints.len(), 2);
+        assert_eq!(engine.change_checkpoints.len(), 1);
+
+        assert!(engine.manual_step(StepMode::Change));
+        assert_eq!(
+            engine.buffer.lines,
+            vec!["seed!".to_string(), "branch".to_string()]
+        );
+        assert_eq!(engine.line_checkpoints.len(), 3);
+        assert_eq!(engine.change_checkpoints.len(), 2);
+
+        assert!(engine.restore_line_checkpoint());
+        assert_eq!(engine.buffer.lines, vec!["seed!".to_string()]);
+        assert_eq!(engine.current_step, 4);
+        assert_eq!(engine.state, AnimationState::Playing);
+        assert!(engine.paused);
+
+        assert!(engine.restore_change_checkpoint());
+        assert_eq!(engine.buffer.lines, vec!["seed".to_string()]);
+        assert_eq!(engine.current_step, 2);
+        assert!(matches!(
+            engine.current_file_path.as_deref(),
+            Some("src/lib.rs")
+        ));
     }
 }
