@@ -161,19 +161,35 @@ impl<'a> UI<'a> {
 
     fn setup_signal_handler(should_exit: Arc<AtomicBool>) {
         ctrlc::set_handler(move || {
-            // Restore terminal state before exiting
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                io::stdout(),
-                LeaveAlternateScreen,
-                DisableMouseCapture,
-                crossterm::cursor::Show
-            );
-            should_exit.store(true, Ordering::SeqCst);
-            // Exit immediately for external signals (SIGTERM)
-            std::process::exit(0);
+            let mut stdout = io::stdout();
+            Self::handle_external_signal(should_exit.as_ref(), &mut stdout, std::process::exit);
         })
         .expect("Error setting Ctrl-C handler");
+    }
+
+    fn handle_external_signal<W: io::Write, F, T>(
+        should_exit: &AtomicBool,
+        writer: &mut W,
+        exit: F,
+    ) -> T
+    where
+        F: FnOnce(i32) -> T,
+    {
+        // Restore terminal state before exiting
+        let _ = disable_raw_mode();
+        let _ = Self::leave_terminal_ui(writer);
+        should_exit.store(true, Ordering::SeqCst);
+        // Exit immediately for external signals (SIGTERM)
+        exit(0)
+    }
+
+    fn leave_terminal_ui<W: io::Write>(writer: &mut W) -> io::Result<()> {
+        execute!(
+            writer,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        )
     }
 
     /// Loads a commit and starts the animation.
@@ -489,12 +505,7 @@ impl<'a> UI<'a> {
 
     fn cleanup(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
+        Self::leave_terminal_ui(terminal.backend_mut())?;
         Ok(())
     }
 
@@ -788,6 +799,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use git2::{Repository, Signature, Time};
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+    use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering, Ordering as CounterOrdering};
@@ -959,6 +971,33 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn leave_terminal_ui_writes_restore_escape_sequences() {
+        let mut output = Vec::new();
+
+        UI::leave_terminal_ui(&mut output).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\u{1b}[?1049l"));
+        assert!(output.contains("\u{1b}[?1000l"));
+        assert!(output.contains("\u{1b}[?25h"));
+    }
+
+    #[test]
+    fn handle_external_signal_restores_terminal_sets_exit_flag_and_requests_exit() {
+        let should_exit = AtomicBool::new(false);
+        let exit_code = Cell::new(None);
+        let mut output = Vec::new();
+
+        UI::handle_external_signal(&should_exit, &mut output, |code| {
+            exit_code.set(Some(code));
+        });
+
+        assert!(should_exit.load(Ordering::SeqCst));
+        assert_eq!(exit_code.get(), Some(0));
+        assert!(!output.is_empty());
     }
 
     #[test]
