@@ -17,7 +17,7 @@ use theme::Theme;
 use ui::UI;
 
 /// Defines the order in which commits are played back during animation.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum PlaybackOrder {
     #[default]
     Random,
@@ -242,6 +242,96 @@ impl Args {
     }
 }
 
+fn is_range_mode(commit: Option<&str>) -> bool {
+    commit.is_some_and(|spec| spec.contains(".."))
+}
+
+fn resolve_order(
+    cli_order: Option<PlaybackOrder>,
+    config_order: &str,
+    is_range_mode: bool,
+    is_filtered: bool,
+) -> PlaybackOrder {
+    let order = cli_order.unwrap_or(match config_order {
+        "asc" => PlaybackOrder::Asc,
+        "desc" => PlaybackOrder::Desc,
+        _ => PlaybackOrder::Random,
+    });
+
+    if (is_range_mode || is_filtered) && cli_order.is_none() {
+        PlaybackOrder::Asc
+    } else {
+        order
+    }
+}
+
+fn collect_ignore_patterns(
+    config_patterns: &[String],
+    ignore_file: Option<&Path>,
+    cli_patterns: &[String],
+) -> Vec<String> {
+    let mut patterns = config_patterns.to_vec();
+
+    if let Some(content) = ignore_file.and_then(|path| std::fs::read_to_string(path).ok()) {
+        patterns.extend(
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .map(String::from),
+        );
+    }
+
+    patterns.extend(cli_patterns.iter().cloned());
+    patterns
+}
+
+fn parse_speed_rules(cli_rules: &[String], config_rules: &[String]) -> Vec<SpeedRule> {
+    cli_rules
+        .iter()
+        .chain(config_rules.iter())
+        .filter_map(|rule| {
+            SpeedRule::parse(rule).or_else(|| {
+                eprintln!("Warning: Invalid speed rule '{}', skipping", rule);
+                None
+            })
+        })
+        .collect()
+}
+
+fn load_initial_commit(
+    repo: &GitRepository,
+    commit: Option<&str>,
+    order: PlaybackOrder,
+) -> Result<git::CommitMetadata> {
+    if is_range_mode(commit) {
+        repo.set_commit_range(commit.expect("range mode requires a commit spec"))?;
+        return match order {
+            PlaybackOrder::Random => repo.random_range_commit(),
+            PlaybackOrder::Asc => repo.next_range_commit_asc(),
+            PlaybackOrder::Desc => repo.next_range_commit_desc(),
+        };
+    }
+
+    if let Some(commit_hash) = commit {
+        return repo.get_commit(commit_hash);
+    }
+
+    match order {
+        PlaybackOrder::Random => repo.random_commit(),
+        PlaybackOrder::Asc => repo.next_asc_commit(),
+        PlaybackOrder::Desc => repo.next_desc_commit(),
+    }
+}
+
+fn should_keep_repo_ref(
+    is_range_mode: bool,
+    is_filtered: bool,
+    is_commit_specified: bool,
+    loop_playback: bool,
+) -> bool {
+    is_range_mode || is_filtered || !is_commit_specified || loop_playback
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -303,8 +393,7 @@ fn main() -> Result<()> {
 
                 let config = Config::load()?;
 
-                let mut patterns = config.ignore_patterns.clone();
-                patterns.extend(ignore.clone());
+                let patterns = collect_ignore_patterns(&config.ignore_patterns, None, ignore);
                 git::init_ignore_patterns(&patterns).ok();
 
                 let theme_name = theme.as_deref().unwrap_or(&config.theme);
@@ -317,19 +406,10 @@ fn main() -> Result<()> {
                     theme = theme.with_transparent_background();
                 }
 
-                let speed_rules: Vec<SpeedRule> = speed_rule
-                    .iter()
-                    .chain(config.speed_rules.iter())
-                    .filter_map(|s| {
-                        SpeedRule::parse(s).or_else(|| {
-                            eprintln!("Warning: Invalid speed rule '{}', skipping", s);
-                            None
-                        })
-                    })
-                    .collect();
+                let speed_rules = parse_speed_rules(speed_rule, &config.speed_rules);
 
                 // Create UI - pass repo ref only if looping (to refresh diff)
-                let repo_ref = if loop_playback { Some(&repo) } else { None };
+                let repo_ref = loop_playback.then_some(&repo);
                 let mut ui = UI::new(
                     speed,
                     repo_ref,
@@ -368,43 +448,23 @@ fn main() -> Result<()> {
     }
 
     let is_commit_specified = args.commit.is_some();
-    let is_range_mode = args
-        .commit
-        .as_ref()
-        .map(|c| c.contains(".."))
-        .unwrap_or(false);
+    let is_range_mode = is_range_mode(args.commit.as_deref());
     let is_filtered = args.author.is_some() || args.before.is_some() || args.after.is_some();
 
     // Load config: CLI arguments > config file > defaults
     let config = Config::load()?;
 
     // Initialize ignore patterns: CLI flags > ignore-file > config
-    let mut patterns = config.ignore_patterns.clone();
-    if let Some(path) = &args.ignore_file {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            patterns.extend(
-                content
-                    .lines()
-                    .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-                    .map(String::from),
-            );
-        }
-    }
-    patterns.extend(args.ignore.clone());
+    let patterns = collect_ignore_patterns(
+        &config.ignore_patterns,
+        args.ignore_file.as_deref(),
+        &args.ignore,
+    );
     git::init_ignore_patterns(&patterns).ok();
     let theme_name = args.theme.as_deref().unwrap_or(&config.theme);
     let speed = args.speed.unwrap_or(config.speed);
     let background = args.background.unwrap_or(config.background);
-    let mut order = args.order.unwrap_or(match config.order.as_str() {
-        "asc" => PlaybackOrder::Asc,
-        "desc" => PlaybackOrder::Desc,
-        _ => PlaybackOrder::Random,
-    });
-
-    // Filtered modes default to asc (chronological) if not explicitly specified
-    if (is_range_mode || is_filtered) && args.order.is_none() {
-        order = PlaybackOrder::Asc;
-    }
+    let order = resolve_order(args.order, &config.order, is_range_mode, is_filtered);
 
     let loop_playback = args.loop_playback.unwrap_or(config.loop_playback);
     let mut theme = Theme::load(theme_name)?;
@@ -414,50 +474,19 @@ fn main() -> Result<()> {
         theme = theme.with_transparent_background();
     }
 
-    // Setup commit range if specified
-    if is_range_mode {
-        repo.set_commit_range(args.commit.as_ref().unwrap())?;
-    }
+    let metadata = load_initial_commit(&repo, args.commit.as_deref(), order)?;
 
-    // Load initial commit
-    let metadata = if is_range_mode {
-        match order {
-            PlaybackOrder::Random => repo.random_range_commit()?,
-            PlaybackOrder::Asc => repo.next_range_commit_asc()?,
-            PlaybackOrder::Desc => repo.next_range_commit_desc()?,
-        }
-    } else if let Some(commit_hash) = &args.commit {
-        repo.get_commit(commit_hash)?
-    } else {
-        match order {
-            PlaybackOrder::Random => repo.random_commit()?,
-            PlaybackOrder::Asc => repo.next_asc_commit()?,
-            PlaybackOrder::Desc => repo.next_desc_commit()?,
-        }
-    };
-
-    // Parse speed rules: CLI args take priority, then config file
-    let speed_rules: Vec<SpeedRule> = args
-        .speed_rule
-        .iter()
-        .chain(config.speed_rules.iter())
-        .filter_map(|s| {
-            SpeedRule::parse(s).or_else(|| {
-                eprintln!("Warning: Invalid speed rule '{}', skipping", s);
-                None
-            })
-        })
-        .collect();
+    let speed_rules = parse_speed_rules(&args.speed_rule, &config.speed_rules);
 
     // Create UI with repository reference
     // Filtered modes (range/author/date) always need repo ref for iteration
-    let repo_ref = if is_range_mode || is_filtered {
-        Some(&repo)
-    } else if is_commit_specified && !loop_playback {
-        None
-    } else {
-        Some(&repo)
-    };
+    let repo_ref = should_keep_repo_ref(
+        is_range_mode,
+        is_filtered,
+        is_commit_specified,
+        loop_playback,
+    )
+    .then_some(&repo);
     let mut ui = UI::new(
         speed,
         repo_ref,
@@ -472,4 +501,242 @@ fn main() -> Result<()> {
     ui.run()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature, Time};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering as CounterOrdering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRepo {
+        path: PathBuf,
+        repo: Repository,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+            let unique_id = format!(
+                "{}_{}_{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                COUNTER.fetch_add(1, CounterOrdering::SeqCst)
+            );
+            let path = std::env::temp_dir().join(format!("gitlogue_main_test_{unique_id}"));
+            fs::create_dir_all(&path).unwrap();
+
+            let repo = Repository::init(&path).unwrap();
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "Test User").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+
+            Self { path, repo }
+        }
+
+        fn commit_file(
+            &self,
+            relative_path: &str,
+            content: &str,
+            message: &str,
+            timestamp: i64,
+        ) -> String {
+            let file_path = self.path.join(relative_path);
+            file_path
+                .parent()
+                .map(fs::create_dir_all)
+                .transpose()
+                .unwrap();
+            fs::write(&file_path, content).unwrap();
+
+            let mut index = self.repo.index().unwrap();
+            index.add_path(Path::new(relative_path)).unwrap();
+            index.write().unwrap();
+
+            let tree_id = index.write_tree().unwrap();
+            let tree = self.repo.find_tree(tree_id).unwrap();
+            let signature =
+                Signature::new("Test User", "test@example.com", &Time::new(timestamp, 0)).unwrap();
+            let parent = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+
+            let oid = match parent.as_ref() {
+                Some(parent_commit) => self.repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[parent_commit],
+                ),
+                None => self
+                    .repo
+                    .commit(Some("HEAD"), &signature, &signature, message, &tree, &[]),
+            }
+            .unwrap();
+
+            oid.to_string()
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn test_args(path: Option<PathBuf>) -> Args {
+        Args {
+            path,
+            commit: None,
+            speed: None,
+            theme: None,
+            background: None,
+            order: None,
+            loop_playback: None,
+            license: false,
+            author: None,
+            before: None,
+            after: None,
+            ignore: Vec::new(),
+            ignore_file: None,
+            speed_rule: Vec::new(),
+            command: None,
+        }
+    }
+
+    #[test]
+    fn validate_resolves_git_root_from_nested_files() {
+        let test_repo = TestRepo::new();
+        let file_path = test_repo.path.join("src/main.rs");
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(&file_path, "fn main() {}\n").unwrap();
+
+        let args = test_args(Some(file_path));
+
+        assert_eq!(args.validate().unwrap(), test_repo.path);
+    }
+
+    #[test]
+    fn validate_rejects_missing_and_non_repo_paths() {
+        let missing = test_args(Some(std::env::temp_dir().join("gitlogue_missing_repo")));
+        let missing_error = missing.validate().unwrap_err().to_string();
+        assert!(missing_error.contains("Path does not exist"));
+
+        let dir = TestRepo::new();
+        let non_repo = dir.path.join("plain-dir");
+        fs::create_dir_all(&non_repo).unwrap();
+        fs::remove_dir_all(dir.path.join(".git")).unwrap();
+
+        let error = test_args(Some(non_repo))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Not a Git repository"));
+    }
+
+    #[test]
+    fn resolve_order_defaults_filtered_modes_to_asc_without_overriding_cli() {
+        assert_eq!(
+            resolve_order(None, "desc", false, false),
+            PlaybackOrder::Desc
+        );
+        assert_eq!(
+            resolve_order(None, "random", true, false),
+            PlaybackOrder::Asc
+        );
+        assert_eq!(
+            resolve_order(Some(PlaybackOrder::Desc), "asc", true, true),
+            PlaybackOrder::Desc
+        );
+    }
+
+    #[test]
+    fn collect_ignore_patterns_merges_config_file_and_cli_sources() {
+        let test_repo = TestRepo::new();
+        let ignore_file = test_repo.path.join(".gitlogueignore");
+        fs::write(&ignore_file, "*.tmp\n\n# comment\ncoverage/**\n").unwrap();
+
+        let patterns = collect_ignore_patterns(
+            &["dist/**".to_string()],
+            Some(ignore_file.as_path()),
+            &["*.png".to_string()],
+        );
+
+        assert_eq!(
+            patterns,
+            vec![
+                "dist/**".to_string(),
+                "*.tmp".to_string(),
+                "coverage/**".to_string(),
+                "*.png".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_speed_rules_keeps_valid_rules_in_priority_order() {
+        let rules = parse_speed_rules(
+            &["src/**/*.rs:5".to_string(), "invalid".to_string()],
+            &["README.md:40".to_string()],
+        );
+
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].speed_ms, 5);
+        assert!(rules[0].matches("src/main.rs"));
+        assert_eq!(rules[1].speed_ms, 40);
+        assert!(rules[1].matches("README.md"));
+    }
+
+    #[test]
+    fn load_initial_commit_supports_repo_order_hash_and_ranges() {
+        let test_repo = TestRepo::new();
+        let oldest = test_repo.commit_file("history.txt", "one\n", "first", 1_700_000_000);
+        let middle = test_repo.commit_file("history.txt", "two\n", "second", 1_700_000_100);
+        let newest = test_repo.commit_file("history.txt", "three\n", "third", 1_700_000_200);
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+
+        assert_eq!(
+            load_initial_commit(&repo, None, PlaybackOrder::Asc)
+                .unwrap()
+                .hash,
+            oldest
+        );
+        assert_eq!(
+            load_initial_commit(&repo, Some(newest.as_str()), PlaybackOrder::Random)
+                .unwrap()
+                .hash,
+            newest
+        );
+        assert_eq!(
+            load_initial_commit(&repo, Some("HEAD~2..HEAD"), PlaybackOrder::Asc)
+                .unwrap()
+                .hash,
+            middle
+        );
+        assert_eq!(
+            load_initial_commit(&repo, Some("HEAD~2..HEAD"), PlaybackOrder::Desc)
+                .unwrap()
+                .hash,
+            newest
+        );
+    }
+
+    #[test]
+    fn should_keep_repo_ref_only_drops_one_shot_commit_playback() {
+        assert!(should_keep_repo_ref(true, false, true, false));
+        assert!(should_keep_repo_ref(false, true, true, false));
+        assert!(should_keep_repo_ref(false, false, false, false));
+        assert!(should_keep_repo_ref(false, false, true, true));
+        assert!(!should_keep_repo_ref(false, false, true, false));
+    }
 }
