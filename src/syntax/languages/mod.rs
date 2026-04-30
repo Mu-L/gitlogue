@@ -469,6 +469,17 @@ mod tests {
             .for_each(|path| assert!(get_language(Path::new(path)).is_none(), "{path}"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn get_language_rejects_non_utf8_extensions() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(OsString::from_vec(b"src/file.\xFF".to_vec()));
+
+        assert!(get_language(&path).is_none());
+    }
+
     #[test]
     fn unknown_language_names_return_none() {
         ["", ".", "unknown", "gitlogue"]
