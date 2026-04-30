@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use chrono_english::{parse_date_string, Dialect};
-use git2::{Commit as Git2Commit, Delta, DiffOptions, Oid, Repository};
+use git2::{Commit as Git2Commit, Delta, DiffFindOptions, DiffOptions, Oid, Repository};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rand::RngExt;
 use std::cell::RefCell;
@@ -171,6 +171,16 @@ fn matches_date_filter(
     }
 
     Ok(true)
+}
+
+fn detect_file_moves(diff: &mut git2::Diff, for_untracked: bool) -> Result<()> {
+    let mut options = DiffFindOptions::new();
+    options.renames(true);
+    if for_untracked {
+        options.for_untracked(true);
+    }
+    diff.find_similar(Some(&mut options))
+        .context("Failed to detect file renames in diff")
 }
 
 pub struct GitRepository {
@@ -603,7 +613,7 @@ impl GitRepository {
         let mut diff_opts = DiffOptions::new();
         diff_opts.context_lines(3);
 
-        let diff = match repo.diff_tree_to_tree(
+        let mut diff = match repo.diff_tree_to_tree(
             parent_tree.as_ref(),
             Some(&commit_tree),
             Some(&mut diff_opts),
@@ -611,6 +621,7 @@ impl GitRepository {
             Ok(d) => d,
             Err(_) => return Ok(Vec::new()), // Skip if diff fails
         };
+        detect_file_moves(&mut diff, false)?;
 
         let mut changes = Vec::new();
 
@@ -816,10 +827,11 @@ impl GitRepository {
         let mut diff_opts = DiffOptions::new();
         diff_opts.context_lines(3);
 
-        let diff = self
+        let mut diff = self
             .repo
             .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut diff_opts))
             .context("Failed to diff tree to index")?;
+        detect_file_moves(&mut diff, false)?;
 
         self.extract_changes_from_diff(&diff, head_tree.as_ref(), None)
     }
@@ -835,10 +847,11 @@ impl GitRepository {
         diff_opts.context_lines(3);
         diff_opts.include_untracked(true);
 
-        let diff = self
+        let mut diff = self
             .repo
             .diff_index_to_workdir(Some(&index), Some(&mut diff_opts))
             .context("Failed to diff index to workdir")?;
+        detect_file_moves(&mut diff, true)?;
 
         // For unstaged, "old" content comes from index, "new" from workdir
         self.extract_changes_from_diff_workdir(&diff, &index)
@@ -1213,6 +1226,34 @@ mod tests {
         assert_eq!(mode, DiffMode::Staged);
     }
 
+    #[test]
+    fn test_file_status_mappings_cover_remaining_variants() {
+        let status_pairs = [
+            (FileStatus::Added, "A"),
+            (FileStatus::Deleted, "D"),
+            (FileStatus::Modified, "M"),
+            (FileStatus::Renamed, "R"),
+            (FileStatus::Copied, "C"),
+            (FileStatus::Unmodified, "U"),
+        ];
+        assert!(status_pairs
+            .iter()
+            .all(|(status, symbol)| status.as_str() == *symbol));
+
+        let delta_pairs = [
+            (Delta::Added, FileStatus::Added),
+            (Delta::Deleted, FileStatus::Deleted),
+            (Delta::Modified, FileStatus::Modified),
+            (Delta::Renamed, FileStatus::Renamed),
+            (Delta::Copied, FileStatus::Copied),
+            (Delta::Unmodified, FileStatus::Unmodified),
+            (Delta::Typechange, FileStatus::Modified),
+        ];
+        assert!(delta_pairs
+            .iter()
+            .all(|(delta, status)| FileStatus::from(*delta) == status.clone()));
+    }
+
     // RAII guard for temporary git repository - auto-cleans on drop
     struct TestRepo {
         path: std::path::PathBuf,
@@ -1255,6 +1296,464 @@ mod tests {
 
             Self { path, repo }
         }
+
+        fn commit_index(
+            &self,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            let mut index = self.repo.index().unwrap();
+            index.write().unwrap();
+
+            let tree_id = index.write_tree().unwrap();
+            let tree = self.repo.find_tree(tree_id).unwrap();
+            let signature =
+                git2::Signature::new(author_name, author_email, &git2::Time::new(timestamp, 0))
+                    .unwrap();
+            let parent = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+
+            match parent.as_ref() {
+                Some(parent_commit) => self.repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[parent_commit],
+                ),
+                None => self
+                    .repo
+                    .commit(Some("HEAD"), &signature, &signature, message, &tree, &[]),
+            }
+            .unwrap()
+            .to_string()
+        }
+
+        fn commit_file(
+            &self,
+            relative_path: &str,
+            content: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            let file_path = self.path.join(relative_path);
+            file_path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .unwrap();
+            std::fs::write(&file_path, content).unwrap();
+
+            let mut index = self.repo.index().unwrap();
+            index.add_path(std::path::Path::new(relative_path)).unwrap();
+            index.write().unwrap();
+            self.commit_index(author_name, author_email, timestamp, message)
+        }
+
+        fn remove_file(
+            &self,
+            relative_path: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            std::fs::remove_file(self.path.join(relative_path)).unwrap();
+
+            let mut index = self.repo.index().unwrap();
+            index
+                .remove_path(std::path::Path::new(relative_path))
+                .unwrap();
+            index.write().unwrap();
+            self.commit_index(author_name, author_email, timestamp, message)
+        }
+
+        fn stage_rename(&self, from: &str, to: &str) {
+            let from_path = self.path.join(from);
+            let to_path = self.path.join(to);
+            to_path
+                .parent()
+                .map(std::fs::create_dir_all)
+                .transpose()
+                .unwrap();
+            std::fs::rename(from_path, &to_path).unwrap();
+
+            let mut index = self.repo.index().unwrap();
+            index.remove_path(std::path::Path::new(from)).unwrap();
+            index.add_path(std::path::Path::new(to)).unwrap();
+            index.write().unwrap();
+        }
+
+        fn rename_file(
+            &self,
+            from: &str,
+            to: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            self.stage_rename(from, to);
+            self.commit_index(author_name, author_email, timestamp, message)
+        }
+    }
+
+    fn large_diff_fixture(label: &str) -> String {
+        (0..2_105)
+            .map(|index| {
+                let marker = if (3..2_102).contains(&index) {
+                    label
+                } else {
+                    "context"
+                };
+                format!("{marker}-{index:04}-{}\n", "x".repeat(240))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_commit_navigation_respects_order_and_reset() {
+        let test_repo = TestRepo::new();
+        let oldest = test_repo.commit_file(
+            "history.txt",
+            "one\n",
+            "Alice Example",
+            "alice@work.test",
+            1_700_000_000,
+            "first",
+        );
+        let middle = test_repo.commit_file(
+            "history.txt",
+            "two\n",
+            "Bob Example",
+            "bob@work.test",
+            1_700_000_060,
+            "second",
+        );
+        let newest = test_repo.commit_file(
+            "history.txt",
+            "three\n",
+            "Carol Example",
+            "carol@work.test",
+            1_700_000_120,
+            "third",
+        );
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+
+        assert_eq!(repo.next_desc_commit().unwrap().hash, newest);
+        assert_eq!(repo.next_desc_commit().unwrap().hash, middle);
+
+        repo.reset_index();
+
+        assert_eq!(repo.next_asc_commit().unwrap().hash, oldest);
+        assert_eq!(repo.next_asc_commit().unwrap().hash, middle);
+        assert_eq!(repo.next_asc_commit().unwrap().hash, newest);
+        assert!(repo.next_asc_commit().is_err());
+    }
+
+    #[test]
+    fn test_commit_filters_match_author_and_inclusive_dates() {
+        let test_repo = TestRepo::new();
+        let alice = test_repo.commit_file(
+            "history.txt",
+            "one\n",
+            "Alice Example",
+            "alice@work.test",
+            1_700_001_000,
+            "alice",
+        );
+        let bob = test_repo.commit_file(
+            "history.txt",
+            "two\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_001_060,
+            "bob",
+        );
+        test_repo.commit_file(
+            "history.txt",
+            "three\n",
+            "Carol Example",
+            "carol@example.com",
+            1_700_001_120,
+            "carol",
+        );
+
+        let mut author_filtered = GitRepository::open(&test_repo.path).unwrap();
+        author_filtered.set_author_filter(Some("WORK.TEST".to_string()));
+        assert_eq!(author_filtered.random_commit().unwrap().hash, alice);
+
+        let mut date_filtered = GitRepository::open(&test_repo.path).unwrap();
+        let bob_date = DateTime::from_timestamp(1_700_001_060, 0).unwrap();
+        date_filtered.set_after_filter(Some(bob_date));
+        date_filtered.set_before_filter(Some(bob_date));
+        assert_eq!(date_filtered.next_desc_commit().unwrap().hash, bob);
+        assert!(date_filtered.next_desc_commit().is_err());
+
+        let mut missing_author = GitRepository::open(&test_repo.path).unwrap();
+        missing_author.set_author_filter(Some("nobody".to_string()));
+        assert!(missing_author.next_desc_commit().is_err());
+    }
+
+    #[test]
+    fn test_commit_filters_report_when_only_date_filters_miss_everything() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "history.txt",
+            "one\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_001_000,
+            "alice",
+        );
+
+        let mut repo = GitRepository::open(&test_repo.path).unwrap();
+        let after_latest = DateTime::from_timestamp(1_700_001_001, 0).unwrap();
+        repo.set_after_filter(Some(after_latest));
+
+        let error = repo.next_desc_commit().unwrap_err().to_string();
+        assert!(error.contains("No commits found matching the filters in repository"));
+    }
+
+    #[test]
+    fn test_commit_range_lookup_and_validation() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn oldest() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_002_000,
+            "oldest",
+        );
+        let middle = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn middle() {}\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_002_060,
+            "middle",
+        );
+        let newest = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn newest() {}\n",
+            "Carol Example",
+            "carol@example.com",
+            1_700_002_120,
+            "newest",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let metadata = repo.get_commit(&middle).unwrap();
+        assert_eq!(metadata.message, "middle");
+        assert_eq!(metadata.changes[0].path, "src/lib.rs");
+
+        repo.set_commit_range("HEAD~2..HEAD").unwrap();
+        assert_eq!(repo.next_range_commit_asc().unwrap().hash, middle);
+        assert_eq!(repo.next_range_commit_asc().unwrap().hash, newest);
+        assert!(repo.next_range_commit_asc().is_err());
+
+        let desc_repo = GitRepository::open(&test_repo.path).unwrap();
+        desc_repo.set_commit_range("HEAD~2..HEAD").unwrap();
+        assert_eq!(desc_repo.next_range_commit_desc().unwrap().hash, newest);
+        assert_eq!(desc_repo.next_range_commit_desc().unwrap().hash, middle);
+        assert!(desc_repo.next_range_commit_desc().is_err());
+
+        let random_repo = GitRepository::open(&test_repo.path).unwrap();
+        random_repo.set_commit_range("HEAD~2..HEAD").unwrap();
+        let random_hash = random_repo.random_range_commit().unwrap().hash;
+        assert!([middle.clone(), newest.clone()].contains(&random_hash));
+
+        let invalid_repo = GitRepository::open(&test_repo.path).unwrap();
+        assert!(invalid_repo.set_commit_range("HEAD...HEAD").is_err());
+        assert!(invalid_repo.set_commit_range("HEAD").is_err());
+    }
+
+    #[test]
+    fn test_commit_range_reports_empty_but_valid_ranges() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn only() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_002_000,
+            "only",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let error = repo.set_commit_range("HEAD..HEAD").unwrap_err().to_string();
+        assert!(error.contains("No non-merge commits found in range"));
+    }
+
+    #[test]
+    fn test_commit_range_supports_open_ended_and_defensive_cases() {
+        let test_repo = TestRepo::new();
+        let oldest = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn oldest() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_003_000,
+            "oldest",
+        );
+        let middle = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn middle() {}\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_003_060,
+            "middle",
+        );
+        let newest = test_repo.commit_file(
+            "src/lib.rs",
+            "pub fn newest() {}\n",
+            "Carol Example",
+            "carol@example.com",
+            1_700_003_120,
+            "newest",
+        );
+
+        let full_range_repo = GitRepository::open(&test_repo.path).unwrap();
+        full_range_repo.set_commit_range("..HEAD").unwrap();
+        let hashes = (0..3)
+            .map(|_| full_range_repo.next_range_commit_asc().unwrap().hash)
+            .collect::<Vec<_>>();
+        assert_eq!(hashes, vec![oldest, middle.clone(), newest.clone()]);
+
+        let tail_repo = GitRepository::open(&test_repo.path).unwrap();
+        tail_repo.set_commit_range("HEAD~1..").unwrap();
+        assert_eq!(tail_repo.next_range_commit_asc().unwrap().hash, newest);
+        assert!(tail_repo.next_range_commit_asc().is_err());
+
+        let invalid_repo = GitRepository::open(&test_repo.path).unwrap();
+        let error = invalid_repo
+            .set_commit_range("HEAD..HEAD..HEAD")
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid range format"));
+
+        let empty_range_repo = GitRepository::open(&test_repo.path).unwrap();
+        *empty_range_repo.commit_range.borrow_mut() = Some(vec![]);
+        assert!(empty_range_repo
+            .next_range_commit_asc()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+        assert!(empty_range_repo
+            .next_range_commit_desc()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+        assert!(empty_range_repo
+            .random_range_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No commits in range"));
+    }
+
+    #[test]
+    fn test_commit_navigation_defensive_guards_reject_empty_cache() {
+        let test_repo = TestRepo::new();
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+
+        *repo.commit_cache.borrow_mut() = Some(vec![]);
+        assert!(repo
+            .next_asc_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No non-merge commits found"));
+
+        *repo.commit_cache.borrow_mut() = Some(vec![]);
+        assert!(repo
+            .next_desc_commit()
+            .unwrap_err()
+            .to_string()
+            .contains("No non-merge commits found"));
+    }
+
+    #[test]
+    fn test_parse_date_and_sorted_file_indices_cover_edge_cases() {
+        let parsed = parse_date("2024-01-01").unwrap();
+        assert_eq!(
+            parsed.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+            "2024-01-01"
+        );
+        assert!(parse_date("definitely-not-a-date").is_err());
+
+        let metadata = CommitMetadata {
+            hash: "hash".to_string(),
+            author: "author".to_string(),
+            date: Utc::now(),
+            message: "message".to_string(),
+            changes: vec![
+                FileChange {
+                    path: "src/main.rs".to_string(),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    is_binary: false,
+                    is_excluded: false,
+                    exclusion_reason: None,
+                    old_content: None,
+                    new_content: None,
+                    hunks: vec![],
+                    diff: String::new(),
+                },
+                FileChange {
+                    path: "Cargo.toml".to_string(),
+                    old_path: None,
+                    status: FileStatus::Added,
+                    is_binary: false,
+                    is_excluded: false,
+                    exclusion_reason: None,
+                    old_content: None,
+                    new_content: None,
+                    hunks: vec![],
+                    diff: String::new(),
+                },
+                FileChange {
+                    path: "src/lib.rs".to_string(),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    is_binary: false,
+                    is_excluded: false,
+                    exclusion_reason: None,
+                    old_content: None,
+                    new_content: None,
+                    hunks: vec![],
+                    diff: String::new(),
+                },
+                FileChange {
+                    path: "docs/guide.md".to_string(),
+                    old_path: None,
+                    status: FileStatus::Added,
+                    is_binary: false,
+                    is_excluded: false,
+                    exclusion_reason: None,
+                    old_content: None,
+                    new_content: None,
+                    hunks: vec![],
+                    diff: String::new(),
+                },
+            ],
+        };
+
+        let sorted_paths: Vec<&str> = metadata
+            .sorted_file_indices()
+            .iter()
+            .map(|&index| metadata.changes[index].path.as_str())
+            .collect();
+        assert_eq!(
+            sorted_paths,
+            vec!["Cargo.toml", "docs/guide.md", "src/lib.rs", "src/main.rs"]
+        );
     }
 
     #[test]
@@ -1459,5 +1958,273 @@ mod tests {
         let now = Utc::now();
         let diff = now.signed_duration_since(result.date);
         assert!(diff.num_seconds() < 60);
+    }
+
+    #[test]
+    fn test_get_commit_omits_oversized_blob_contents_and_keeps_context_lines() {
+        let test_repo = TestRepo::new();
+        let original = large_diff_fixture("before");
+        let updated = large_diff_fixture("after");
+        assert!(original.len() > MAX_BLOB_SIZE);
+        assert!(updated.len() > MAX_BLOB_SIZE);
+
+        test_repo.commit_file(
+            "large.txt",
+            &original,
+            "Alice Example",
+            "alice@example.com",
+            1_700_004_000,
+            "large base",
+        );
+        let updated_hash = test_repo.commit_file(
+            "large.txt",
+            &updated,
+            "Bob Example",
+            "bob@example.com",
+            1_700_004_060,
+            "large update",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let metadata = repo.get_commit(&updated_hash).unwrap();
+        let change = &metadata.changes[0];
+        let context_lines = change
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| matches!(line.change_type, LineChangeType::Context))
+            .count();
+
+        assert_eq!(change.path, "large.txt");
+        assert!(change.old_content.is_none());
+        assert!(change.new_content.is_none());
+        assert!(change.is_excluded);
+        assert!(change
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("too many changes")));
+        assert!(context_lines >= 6);
+    }
+
+    #[test]
+    fn test_working_tree_diff_omits_oversized_index_and_workdir_contents() {
+        let test_repo = TestRepo::new();
+        let large = large_diff_fixture("staged");
+        let updated = large_diff_fixture("workdir");
+        let file = test_repo.path.join("large.txt");
+
+        test_repo.commit_file(
+            "large.txt",
+            "small\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_005_000,
+            "small base",
+        );
+
+        std::fs::write(&file, &large).unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("large.txt")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let staged = repo.get_working_tree_diff(DiffMode::Staged).unwrap();
+        let staged_change = &staged.changes[0];
+        assert_eq!(staged_change.old_content.as_deref(), Some("small\n"));
+        assert!(staged_change.new_content.is_none());
+        assert!(staged_change.is_excluded);
+
+        test_repo.commit_file(
+            "large.txt",
+            &large,
+            "Bob Example",
+            "bob@example.com",
+            1_700_005_060,
+            "large base",
+        );
+
+        std::fs::write(&file, "small again\n").unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("large.txt")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let staged_from_large = repo.get_working_tree_diff(DiffMode::Staged).unwrap();
+        let staged_from_large_change = &staged_from_large.changes[0];
+        assert!(staged_from_large_change.old_content.is_none());
+        assert_eq!(
+            staged_from_large_change.new_content.as_deref(),
+            Some("small again\n")
+        );
+
+        std::fs::write(&file, &updated).unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let unstaged = repo.get_working_tree_diff(DiffMode::Unstaged).unwrap();
+        let unstaged_change = &unstaged.changes[0];
+        assert_eq!(
+            unstaged_change.old_content.as_deref(),
+            Some("small again\n")
+        );
+        assert!(unstaged_change.new_content.is_none());
+        assert!(unstaged_change.is_excluded);
+    }
+
+    #[test]
+    fn test_get_commit_handles_added_and_deleted_file_contents() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "tracked.txt",
+            "tracked\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_000,
+            "base commit",
+        );
+        let added_hash = test_repo.commit_file(
+            "added.txt",
+            "added\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_006_060,
+            "add file",
+        );
+        let deleted_hash = test_repo.remove_file(
+            "tracked.txt",
+            "Carol Example",
+            "carol@example.com",
+            1_700_006_120,
+            "delete file",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let added_change = repo
+            .get_commit(&added_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "added.txt")
+            .unwrap();
+        let deleted_change = repo
+            .get_commit(&deleted_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "tracked.txt")
+            .unwrap();
+
+        assert_eq!(added_change.status, FileStatus::Added);
+        assert!(added_change.old_content.is_none());
+        assert_eq!(added_change.new_content.as_deref(), Some("added\n"));
+        assert_eq!(deleted_change.status, FileStatus::Deleted);
+        assert_eq!(deleted_change.old_content.as_deref(), Some("tracked\n"));
+        assert!(deleted_change.new_content.is_none());
+    }
+
+    #[test]
+    fn test_get_commit_detects_renamed_files_and_keeps_old_path() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/original.rs",
+            "pub fn renamed() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_500,
+            "base commit",
+        );
+        let renamed_hash = test_repo.rename_file(
+            "src/original.rs",
+            "src/renamed.rs",
+            "Bob Example",
+            "bob@example.com",
+            1_700_006_560,
+            "rename file",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_commit(&renamed_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "src/renamed.rs")
+            .unwrap();
+
+        assert_eq!(change.status, FileStatus::Renamed);
+        assert_eq!(change.old_path.as_deref(), Some("src/original.rs"));
+        assert_eq!(change.old_content.as_deref(), Some("pub fn renamed() {}\n"));
+        assert_eq!(change.new_content.as_deref(), Some("pub fn renamed() {}\n"));
+    }
+
+    #[test]
+    fn test_working_tree_diff_detects_staged_renames() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "src/original.rs",
+            "pub fn renamed() {}\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_620,
+            "base commit",
+        );
+        test_repo.stage_rename("src/original.rs", "src/renamed.rs");
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_working_tree_diff(DiffMode::Staged)
+            .unwrap()
+            .changes[0]
+            .clone();
+
+        assert_eq!(change.status, FileStatus::Renamed);
+        assert_eq!(change.path, "src/renamed.rs");
+        assert_eq!(change.old_path.as_deref(), Some("src/original.rs"));
+        assert_eq!(change.old_content.as_deref(), Some("pub fn renamed() {}\n"));
+        assert_eq!(change.new_content.as_deref(), Some("pub fn renamed() {}\n"));
+    }
+
+    #[test]
+    fn test_working_tree_diff_excludes_lockfiles_and_preserves_context_lines() {
+        let test_repo = TestRepo::new();
+        let original = "version = 3\n[[package]]\nname = \"gitlogue\"\nchecksum = \"old\"\n";
+        let updated = "version = 3\n[[package]]\nname = \"gitlogue\"\nchecksum = \"new\"\n";
+        test_repo.commit_file(
+            "Cargo.lock",
+            original,
+            "Alice Example",
+            "alice@example.com",
+            1_700_007_000,
+            "lock base",
+        );
+
+        std::fs::write(test_repo.path.join("Cargo.lock"), updated).unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("Cargo.lock")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_working_tree_diff(DiffMode::Staged)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "Cargo.lock")
+            .unwrap();
+        let context_lines = change
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| matches!(line.change_type, LineChangeType::Context))
+            .map(|line| (line.content.clone(), line.old_line_no, line.new_line_no))
+            .collect::<Vec<_>>();
+
+        assert!(change.is_excluded);
+        assert_eq!(
+            change.exclusion_reason.as_deref(),
+            Some("lock/generated file")
+        );
+        assert_eq!(change.old_content.as_deref(), Some(original));
+        assert_eq!(change.new_content.as_deref(), Some(updated));
+        assert!(context_lines.contains(&("name = \"gitlogue\"\n".to_string(), Some(3), Some(3),)));
     }
 }

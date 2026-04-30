@@ -114,13 +114,18 @@ impl Highlighter {
     }
 
     pub fn set_language_from_path(&mut self, path: &str) -> bool {
-        self.clear_language();
         let Some(support) = get_language(Path::new(path)) else {
+            self.clear_language();
             return false;
         };
-        if self.parser.set_language(&support.language).is_err() {
-            return false;
-        }
+        self.set_language_support(support)
+    }
+
+    fn set_language_support(&mut self, support: LanguageSupport) -> bool {
+        self.clear_language();
+        self.parser
+            .set_language(&support.language)
+            .expect("bundled tree-sitter languages must match the runtime ABI");
         let Ok(highlight_query) = Query::new(&support.language, support.highlight_query) else {
             return false;
         };
@@ -285,12 +290,16 @@ fn capture_index(query: &Query, name: &str) -> Option<u32> {
 }
 
 fn resolve_injection_language(query: &Query, m: &QueryMatch, source: &str) -> Option<String> {
-    for prop in query.property_settings(m.pattern_index) {
-        if prop.key.as_ref() == "injection.language" {
-            if let Some(value) = &prop.value {
-                return Some(value.to_ascii_lowercase());
-            }
-        }
+    if let Some(value) = query
+        .property_settings(m.pattern_index)
+        .iter()
+        .find_map(|prop| {
+            (prop.key.as_ref() == "injection.language")
+                .then_some(prop.value.as_ref())
+                .flatten()
+        })
+    {
+        return Some(value.as_ref().to_ascii_lowercase());
     }
     let lang_idx = capture_index(query, "injection.language")?;
     m.captures
@@ -314,15 +323,15 @@ fn highlight_slice(
     depth: u8,
 ) -> Vec<HighlightSpan> {
     let mut parser = Parser::new();
-    if parser.set_language(&support.language).is_err() {
-        return Vec::new();
-    }
+    parser
+        .set_language(&support.language)
+        .expect("bundled tree-sitter languages must match the runtime ABI");
     let Ok(highlight_query) = Query::new(&support.language, support.highlight_query) else {
         return Vec::new();
     };
-    let Some(tree) = parser.parse(source, None) else {
-        return Vec::new();
-    };
+    let tree = parser
+        .parse(source, None)
+        .expect("fresh highlight parsers should not be cancelled");
 
     let outer = collect_spans(&highlight_query, &tree, source);
     let injections = support
@@ -358,4 +367,361 @@ fn merge_injection_spans(
     }
     merged.sort_by_key(|span| span.start);
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use streaming_iterator::StreamingIterator;
+
+    fn parse_tree(support: &LanguageSupport, source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser.set_language(&support.language).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    fn span_tuples(spans: &[HighlightSpan]) -> Vec<(usize, usize, TokenType)> {
+        spans
+            .iter()
+            .map(|span| (span.start, span.end, span.token_type))
+            .collect()
+    }
+
+    #[test]
+    fn capture_names_map_to_tokens_and_theme_colors() {
+        let theme = Theme::default();
+        let cases = [
+            ("annotation", TokenType::Keyword, theme.syntax_keyword),
+            ("comment", TokenType::Comment, theme.syntax_comment),
+            ("boolean", TokenType::Constant, theme.syntax_constant),
+            ("character.escape", TokenType::String, theme.syntax_string),
+            ("conditional", TokenType::Keyword, theme.syntax_keyword),
+            (
+                "delimiter",
+                TokenType::Punctuation,
+                theme.syntax_punctuation,
+            ),
+            ("escape", TokenType::Operator, theme.syntax_operator),
+            ("field", TokenType::Property, theme.syntax_property),
+            ("float", TokenType::Number, theme.syntax_number),
+            (
+                "function.method",
+                TokenType::Function,
+                theme.syntax_function,
+            ),
+            ("identifier", TokenType::Variable, theme.syntax_variable),
+            ("keyword", TokenType::Keyword, theme.syntax_keyword),
+            ("label", TokenType::Label, theme.syntax_label),
+            ("method", TokenType::Function, theme.syntax_function),
+            ("namespace", TokenType::Type, theme.syntax_type),
+            ("number", TokenType::Number, theme.syntax_number),
+            ("operator", TokenType::Operator, theme.syntax_operator),
+            ("parameter", TokenType::Parameter, theme.syntax_parameter),
+            ("property", TokenType::Property, theme.syntax_property),
+            (
+                "punctuation.delimiter",
+                TokenType::Punctuation,
+                theme.syntax_punctuation,
+            ),
+            ("regexp", TokenType::String, theme.syntax_string),
+            ("special", TokenType::Operator, theme.syntax_operator),
+            ("string.special", TokenType::String, theme.syntax_string),
+            ("struct", TokenType::Type, theme.syntax_type),
+            ("tag", TokenType::Type, theme.syntax_type),
+            ("type.definition", TokenType::Type, theme.syntax_type),
+            ("variable", TokenType::Variable, theme.syntax_variable),
+        ];
+
+        assert!(cases.into_iter().all(|(capture, token, color)| {
+            capture_name_to_token(capture) == Some(token) && token.color(&theme) == color
+        }));
+        assert_eq!(capture_name_to_token("unknown"), None);
+    }
+
+    #[test]
+    fn set_language_from_path_clears_previous_state_for_unknown_extensions() {
+        let mut highlighter = Highlighter::new();
+
+        assert!(highlighter.set_language_from_path("main.rs"));
+        assert!(!highlighter.highlight("fn main() {}\n").is_empty());
+        assert!(highlighter.cached_tree.is_some());
+        assert_eq!(highlighter.cached_source, "fn main() {}\n");
+
+        assert!(!highlighter.set_language_from_path("README.unknown"));
+        assert!(highlighter.highlight("fn main() {}\n").is_empty());
+        assert!(highlighter.cached_tree.is_none());
+        assert!(highlighter.cached_source.is_empty());
+        assert!(highlighter.highlight_query.is_none());
+        assert!(highlighter.injection_query.is_none());
+    }
+
+    #[test]
+    fn set_language_support_rejects_invalid_queries_after_clearing_cached_state() {
+        let rust = get_language_by_name("rust").unwrap();
+        let invalid_support = LanguageSupport {
+            language: rust.language,
+            highlight_query: "(",
+            injection_query: None,
+        };
+        let mut highlighter = Highlighter::new();
+
+        assert!(highlighter.set_language_from_path("main.rs"));
+        assert!(!highlighter.highlight("fn main() {}\n").is_empty());
+        assert!(highlighter.cached_tree.is_some());
+
+        assert!(!highlighter.set_language_support(invalid_support));
+        assert!(highlighter.language.is_none());
+        assert!(highlighter.highlight_query.is_none());
+        assert!(highlighter.cached_tree.is_none());
+        assert!(highlighter.cached_source.is_empty());
+    }
+
+    #[test]
+    fn default_highlighter_keeps_repeated_highlights_stable() {
+        let source = "fn main() { let answer = 42; }\n";
+        let mut highlighter = Highlighter::default();
+
+        assert!(highlighter.highlight(source).is_empty());
+        assert!(highlighter.set_language_from_path("main.rs"));
+
+        let first = highlighter.highlight(source);
+        let first_tree = highlighter.cached_tree.clone().unwrap();
+        let second = highlighter.highlight(source);
+        let second_tree = highlighter.cached_tree.clone().unwrap();
+
+        assert_eq!(span_tuples(&first), span_tuples(&second));
+        assert_eq!(
+            first_tree.root_node().to_sexp(),
+            second_tree.root_node().to_sexp()
+        );
+        assert_eq!(highlighter.cached_source, source);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn highlight_returns_empty_when_parser_is_cancelled() {
+        let mut highlighter = Highlighter::new();
+        let source = "fn main() {}\n".repeat(50_000);
+        let cancellation_flag = std::sync::atomic::AtomicUsize::new(1);
+
+        assert!(highlighter.set_language_from_path("main.rs"));
+        unsafe {
+            highlighter
+                .parser
+                .set_cancellation_flag(Some(&cancellation_flag));
+        }
+
+        assert!(highlighter.highlight(&source).is_empty());
+        assert!(highlighter.cached_tree.is_none());
+        assert!(highlighter.cached_source.is_empty());
+    }
+
+    #[test]
+    fn cloned_highlighter_preserves_markdown_injection_queries() {
+        let source = "```rust\nfn main() { let answer = 42; }\n```\n";
+        let code_start = source.find("fn main()").unwrap();
+        let code_end = code_start + "fn main() { let answer = 42; }".len();
+        let mut original = Highlighter::new();
+
+        assert!(original.set_language_from_path("README.md"));
+        let mut cloned = original.clone();
+
+        let original_spans = original.highlight(source);
+        let cloned_spans = cloned.highlight(source);
+
+        assert!(span_tuples(&original_spans)
+            .iter()
+            .any(|(start, end, _)| *start >= code_start && *end <= code_end));
+        assert_eq!(span_tuples(&original_spans), span_tuples(&cloned_spans));
+    }
+
+    #[test]
+    fn resolve_injection_language_supports_properties_and_cleaned_captures() {
+        let html = get_language_by_name("html").unwrap();
+        let html_query = Query::new(&html.language, html.injection_query.unwrap()).unwrap();
+        let html_source = "<script>const answer = 42;</script>";
+        let html_tree = parse_tree(&html, html_source);
+        let mut html_cursor = QueryCursor::new();
+        let mut html_matches =
+            html_cursor.matches(&html_query, html_tree.root_node(), html_source.as_bytes());
+
+        assert_eq!(
+            html_matches
+                .next()
+                .and_then(|matched| resolve_injection_language(&html_query, matched, html_source)),
+            Some("javascript".to_string())
+        );
+
+        let markdown = get_language_by_name("markdown").unwrap();
+        let markdown_query =
+            Query::new(&markdown.language, markdown.injection_query.unwrap()).unwrap();
+        let markdown_source = "```Rust,ignore {1}\nfn main() {}\n```\n";
+        let markdown_tree = parse_tree(&markdown, markdown_source);
+        let mut markdown_cursor = QueryCursor::new();
+        let mut markdown_matches = markdown_cursor.matches(
+            &markdown_query,
+            markdown_tree.root_node(),
+            markdown_source.as_bytes(),
+        );
+
+        assert_eq!(
+            markdown_matches.next().and_then(|matched| {
+                resolve_injection_language(&markdown_query, matched, markdown_source)
+            }),
+            Some("rust".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_injection_language_rejects_blank_capture_text() {
+        let html = get_language_by_name("html").unwrap();
+        let query = Query::new(
+            &html.language,
+            "(script_element (raw_text) @injection.language)",
+        )
+        .unwrap();
+        let source = "<script>   </script>";
+        let tree = parse_tree(&html, source);
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+
+        assert_eq!(
+            matches
+                .next()
+                .and_then(|matched| resolve_injection_language(&query, matched, source)),
+            None
+        );
+    }
+
+    #[test]
+    fn gather_injections_ignores_queries_without_content_or_known_language() {
+        let html = get_language_by_name("html").unwrap();
+        let source = "<script>const answer = 42;</script>";
+        let tree = parse_tree(&html, source);
+
+        let no_content_query =
+            Query::new(&html.language, "(script_element (raw_text) @none)").unwrap();
+        assert!(gather_injections(&no_content_query, &tree, source, 0).is_empty());
+
+        let no_language_query = Query::new(
+            &html.language,
+            "(script_element (raw_text) @injection.content)",
+        )
+        .unwrap();
+        assert!(gather_injections(&no_language_query, &tree, source, 0).is_empty());
+
+        let unknown_language_query = Query::new(
+            &html.language,
+            "((script_element (raw_text) @injection.content) (#set! injection.language \"madeup\"))",
+        )
+        .unwrap();
+        assert!(gather_injections(&unknown_language_query, &tree, source, 0).is_empty());
+
+        let empty_script = "<script></script>";
+        let empty_tree = parse_tree(&html, empty_script);
+        let html_query = Query::new(&html.language, html.injection_query.unwrap()).unwrap();
+        assert!(gather_injections(&html_query, &empty_tree, empty_script, 0).is_empty());
+    }
+
+    #[test]
+    fn gather_injections_and_highlight_slice_preserve_source_ranges() {
+        let html = get_language_by_name("html").unwrap();
+        let query = Query::new(&html.language, html.injection_query.unwrap()).unwrap();
+        let source = "<script>const answer = 42;</script>";
+        let tree = parse_tree(&html, source);
+        let injections = gather_injections(&query, &tree, source, 0);
+        let expected_start = source.find("const answer = 42;").unwrap();
+        let expected_end = expected_start + "const answer = 42;".len();
+        let javascript = get_language_by_name("javascript").unwrap();
+        let offset_spans = highlight_slice(&javascript, "const answer = 42;", 7, 0);
+
+        assert_eq!(injections.len(), 1);
+        assert_eq!(injections[0].0, expected_start..expected_end);
+        assert!(!injections[0].1.is_empty());
+        assert!(injections[0]
+            .1
+            .iter()
+            .all(|span| span.start >= expected_start && span.end <= expected_end));
+        assert!(gather_injections(&query, &tree, source, MAX_INJECTION_DEPTH).is_empty());
+        assert!(!offset_spans.is_empty());
+        assert!(offset_spans
+            .iter()
+            .all(|span| span.start >= 7 && span.end > 7));
+    }
+
+    #[test]
+    fn highlight_slice_runs_nested_injection_queries_when_supported() {
+        let html = get_language_by_name("html").unwrap();
+        let source = "<script>const nested = 1;</script>";
+        let base_offset = 11;
+        let expected_start = base_offset + source.find("const nested = 1;").unwrap();
+        let expected_end = expected_start + "const nested = 1;".len();
+        let spans = highlight_slice(&html, source, base_offset, 0);
+
+        assert!(!spans.is_empty());
+        assert!(spans
+            .iter()
+            .any(|span| span.start >= expected_start && span.end <= expected_end));
+    }
+
+    #[test]
+    fn highlight_slice_returns_empty_for_invalid_queries() {
+        let rust = get_language_by_name("rust").unwrap();
+        let invalid_query_support = LanguageSupport {
+            language: rust.language,
+            highlight_query: "(",
+            injection_query: None,
+        };
+
+        assert!(highlight_slice(&invalid_query_support, "fn main() {}\n", 0, 0).is_empty());
+    }
+
+    #[test]
+    fn merge_injection_spans_replaces_overlaps_and_sorts_output() {
+        let outer = vec![
+            HighlightSpan {
+                start: 12,
+                end: 15,
+                token_type: TokenType::Comment,
+            },
+            HighlightSpan {
+                start: 0,
+                end: 4,
+                token_type: TokenType::Keyword,
+            },
+            HighlightSpan {
+                start: 6,
+                end: 10,
+                token_type: TokenType::Variable,
+            },
+        ];
+        let merged = merge_injection_spans(
+            outer,
+            vec![(
+                5..11,
+                vec![
+                    HighlightSpan {
+                        start: 5,
+                        end: 8,
+                        token_type: TokenType::Function,
+                    },
+                    HighlightSpan {
+                        start: 8,
+                        end: 9,
+                        token_type: TokenType::Number,
+                    },
+                ],
+            )],
+        );
+
+        assert_eq!(
+            span_tuples(&merged),
+            vec![
+                (0, 4, TokenType::Keyword),
+                (5, 8, TokenType::Function),
+                (8, 9, TokenType::Number),
+                (12, 15, TokenType::Comment),
+            ]
+        );
+    }
 }

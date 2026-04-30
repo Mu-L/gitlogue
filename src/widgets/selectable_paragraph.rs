@@ -106,7 +106,6 @@ impl<'a> SelectableParagraph<'a> {
         let mut current_line_spans = Vec::new();
         let mut current_width = 0;
         let mut current_span_text = String::new();
-        let mut current_span_style = None;
         let mut is_first_line = true;
 
         for span in &line.spans {
@@ -134,24 +133,11 @@ impl<'a> SelectableParagraph<'a> {
                     wrapped_lines.push(Line::from(current_line_spans.clone()));
                     current_line_spans.clear();
                     current_width = 0;
-                    current_span_style = None;
                     is_first_line = false;
-                }
-
-                // Check if we need to start a new span (style changed)
-                if current_span_style.is_some()
-                    && current_span_style.unwrap() != span.style
-                    && !current_span_text.is_empty()
-                {
-                    let mut new_span = span.clone();
-                    new_span.content = current_span_text.clone().into();
-                    current_line_spans.push(new_span);
-                    current_span_text.clear();
                 }
 
                 // Add character to current span
                 current_span_text.push(ch);
-                current_span_style = Some(span.style);
                 current_width += ch_width;
             }
 
@@ -161,7 +147,6 @@ impl<'a> SelectableParagraph<'a> {
                 new_span.content = current_span_text.clone().into();
                 current_line_spans.push(new_span);
                 current_span_text.clear();
-                current_span_style = None;
             }
         }
 
@@ -281,10 +266,6 @@ impl Widget for SelectableParagraph<'_> {
                 self.background_style
             };
 
-            if y >= height {
-                continue;
-            }
-
             let render_y = inner_area.y + y as u16;
 
             if *is_first_wrap && !*has_wrap {
@@ -350,11 +331,6 @@ impl Widget for SelectableParagraph<'_> {
                 }
             } else if *is_first_wrap && *has_wrap {
                 // First line with wrapping: apply left padding only, no right padding
-                // Skip if padding would exceed available width
-                if self.padding.left > inner_area.width {
-                    continue;
-                }
-
                 for x in 0..self.padding.left {
                     if let Some(cell) = buf.cell_mut((inner_area.x + x, render_y)) {
                         cell.set_style(fill_style);
@@ -440,5 +416,180 @@ impl Widget for SelectableParagraph<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Style},
+        text::Span,
+        widgets::Widget,
+    };
+
+    fn render_paragraph(widget: SelectableParagraph<'static>, width: u16, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buffer = Buffer::empty(area);
+        widget.render(area, &mut buffer);
+        buffer
+    }
+
+    fn row_symbols(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn wrap_line_respects_unicode_display_width() {
+        let wrapped = SelectableParagraph::wrap_line(&Line::from("ab界cd"), 4, 2);
+
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "ab界");
+        assert_eq!(wrapped[1].to_string(), "cd");
+    }
+
+    #[test]
+    fn wrap_line_preserves_span_styles_across_boundaries() {
+        let line = Line::from(vec![
+            Span::styled("ab", Style::default().fg(Color::Red)),
+            Span::styled("cd", Style::default().fg(Color::Blue)),
+        ]);
+        let wrapped = SelectableParagraph::wrap_line(&line, 3, 3);
+
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].spans[0].content.as_ref(), "ab");
+        assert_eq!(wrapped[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(wrapped[0].spans[1].content.as_ref(), "c");
+        assert_eq!(wrapped[0].spans[1].style.fg, Some(Color::Blue));
+        assert_eq!(wrapped[1].spans[0].content.as_ref(), "d");
+        assert_eq!(wrapped[1].spans[0].style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn wrap_line_returns_original_line_when_first_line_width_is_zero() {
+        let line = Line::from("abc");
+        let wrapped = SelectableParagraph::wrap_line(&line, 0, 4);
+
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].to_string(), "abc");
+    }
+
+    #[test]
+    fn calculate_dim_opacity_respects_distance_and_floor() {
+        let paragraph = SelectableParagraph::new(vec![Line::from("line")])
+            .selected_line(Some(3))
+            .dim(2, 0.4);
+
+        assert!((paragraph.calculate_dim_opacity(3) - 1.0).abs() < f32::EPSILON);
+        assert!((paragraph.calculate_dim_opacity(4) - 0.7).abs() < f32::EPSILON);
+        assert!((paragraph.calculate_dim_opacity(8) - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn render_fills_selected_line_padding_and_content_style() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("hi")])
+                .selected_line(Some(0))
+                .selected_style(Style::default().fg(Color::Yellow).bg(Color::Blue))
+                .background_style(Style::default().bg(Color::Red))
+                .padding(Padding::horizontal(1)),
+            6,
+            1,
+        );
+
+        assert_eq!(row_symbols(&buffer, 0), " hi   ");
+        assert_eq!(buffer[(0, 0)].bg, Color::Blue);
+        assert_eq!(buffer[(1, 0)].fg, Color::Yellow);
+        assert_eq!(buffer[(1, 0)].bg, Color::Blue);
+        assert_eq!(buffer[(5, 0)].bg, Color::Blue);
+    }
+
+    #[test]
+    fn render_uses_left_padding_only_on_wrapped_first_line() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("abcd")])
+                .background_style(Style::default().bg(Color::Red))
+                .padding(Padding::horizontal(1)),
+            4,
+            2,
+        );
+
+        assert_eq!(row_symbols(&buffer, 0), " abc");
+        assert_eq!(row_symbols(&buffer, 1), "d   ");
+        assert_eq!(buffer[(0, 0)].bg, Color::Red);
+        assert_eq!(buffer[(0, 1)].symbol(), "d");
+        assert_eq!(buffer[(3, 1)].bg, Color::Red);
+    }
+
+    #[test]
+    fn render_returns_early_when_padding_consumes_inner_height() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("hidden")]).padding(Padding::new(0, 0, 1, 0)),
+            6,
+            1,
+        );
+
+        assert_eq!(row_symbols(&buffer, 0), "      ");
+    }
+
+    #[test]
+    fn render_returns_early_for_zero_sized_areas() {
+        let buffer = render_paragraph(SelectableParagraph::new(vec![Line::from("hidden")]), 0, 1);
+
+        assert_eq!(buffer.area.width, 0);
+        assert_eq!(row_symbols(&buffer, 0), "");
+    }
+
+    #[test]
+    fn render_skips_unwrapped_content_when_horizontal_padding_exceeds_width() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("x")]).padding(Padding::horizontal(1)),
+            1,
+            1,
+        );
+
+        assert_eq!(row_symbols(&buffer, 0), " ");
+    }
+
+    #[test]
+    fn render_fills_remaining_space_on_wrapped_first_line() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![Line::from("a界界")])
+                .background_style(Style::default().bg(Color::Red))
+                .padding(Padding::horizontal(1)),
+            5,
+            2,
+        );
+
+        assert_eq!(buffer[(0, 0)].bg, Color::Red);
+        assert_eq!(buffer[(4, 0)].symbol(), " ");
+        assert_eq!(buffer[(4, 0)].bg, Color::Red);
+    }
+
+    #[test]
+    fn render_scrolls_selected_wrapped_line_and_applies_selected_style() {
+        let buffer = render_paragraph(
+            SelectableParagraph::new(vec![
+                Line::from("one"),
+                Line::from("two"),
+                Line::from("abcdef"),
+            ])
+            .selected_line(Some(2))
+            .selected_style(Style::default().fg(Color::Yellow).bg(Color::Blue)),
+            3,
+            3,
+        );
+
+        assert_eq!(row_symbols(&buffer, 0), "two");
+        assert_eq!(row_symbols(&buffer, 1), "abc");
+        assert_eq!(row_symbols(&buffer, 2), "def");
+        assert_eq!(buffer[(0, 1)].fg, Color::Yellow);
+        assert_eq!(buffer[(0, 1)].bg, Color::Blue);
+        assert_eq!(buffer[(0, 2)].fg, Color::Yellow);
+        assert_eq!(buffer[(0, 2)].bg, Color::Blue);
     }
 }

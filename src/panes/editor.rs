@@ -270,3 +270,165 @@ impl EditorPane {
             .unwrap_or(theme.syntax_variable) // Use theme color instead of Color::White
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::{HighlightSpan, TokenType};
+    use ratatui::{backend::TestBackend, buffer::Buffer, style::Modifier, Terminal};
+
+    fn highlight(start: usize, end: usize, token_type: TokenType) -> HighlightSpan {
+        HighlightSpan {
+            start,
+            end,
+            token_type,
+        }
+    }
+
+    fn render_buffer(engine: &AnimationEngine, theme: &Theme, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| EditorPane.render(f, Rect::new(0, 0, width, height), engine, theme))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_symbols(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn has_selected_row_background(buffer: &Buffer, selected_bg: Color) -> bool {
+        (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].bg))
+            .any(|bg| bg == selected_bg)
+    }
+
+    #[test]
+    fn render_shows_scrolled_highlighted_lines_and_selected_row_background() {
+        let theme = Theme::default();
+        let mut engine = AnimationEngine::new(16);
+        engine.buffer.lines = vec!["skip".to_string(), "let".to_string(), "tail".to_string()];
+        engine.buffer.scroll_offset = 1;
+        engine.buffer.cursor_line = 2;
+        engine.buffer.cursor_col = 4;
+        engine.cursor_visible = true;
+        engine.active_pane = ActivePane::Editor;
+        engine.buffer.new_highlights = vec![
+            highlight(5, 8, TokenType::Keyword),
+            highlight(9, 13, TokenType::String),
+        ];
+        engine.buffer.new_content_line_offsets = vec![0, 5, 9];
+
+        let buffer = render_buffer(&engine, &theme, 20, 4);
+
+        assert!(!row_symbols(&buffer, 1).contains("skip"));
+        assert!(row_symbols(&buffer, 1).contains("let"));
+        assert!(row_symbols(&buffer, 2).contains("tail"));
+        assert_eq!(buffer[(4, 2)].fg, theme.editor_line_number_cursor);
+        assert_eq!(buffer[(8, 2)].fg, theme.syntax_string);
+        assert_eq!(buffer[(8, 2)].bg, theme.editor_cursor_line_bg);
+
+        let cursor_x = 8 + "tail".chars().count() as u16;
+        assert_eq!(buffer[(cursor_x, 2)].symbol(), " ");
+        assert_eq!(buffer[(cursor_x, 2)].bg, theme.editor_cursor_char_bg);
+        assert_eq!(buffer[(cursor_x, 2)].fg, theme.editor_cursor_char_fg);
+    }
+
+    #[test]
+    fn highlight_line_uses_old_offsets_below_cursor_and_defaults_to_variable_color() {
+        let theme = Theme::default();
+        let pane = EditorPane;
+        let old_highlights = vec![highlight(4, 5, TokenType::Number)];
+        let new_highlights = Vec::new();
+        let old_offsets = vec![0, 4];
+        let new_offsets = Vec::new();
+
+        let spans = pane.highlight_line(HighlightContext {
+            line_content: "xyz",
+            line_num: 2,
+            show_cursor: false,
+            cursor_col: 0,
+            cursor_line: 0,
+            old_highlights: &old_highlights,
+            new_highlights: &new_highlights,
+            old_line_offsets: &old_offsets,
+            new_line_offsets: &new_offsets,
+            line_offset: 1,
+            theme: &theme,
+        });
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "x");
+        assert_eq!(spans[0].style.fg, Some(theme.syntax_number));
+        assert_eq!(spans[1].style.fg, Some(theme.syntax_variable));
+        assert_eq!(spans[2].style.fg, Some(theme.syntax_variable));
+    }
+
+    #[test]
+    fn calculate_byte_offset_falls_back_to_last_known_offset_or_zero() {
+        let pane = EditorPane;
+
+        assert_eq!(pane.calculate_byte_offset(5, 0, 0, &[0, 4]), 4);
+        assert_eq!(pane.calculate_byte_offset(5, 0, 0, &[]), 0);
+    }
+
+    #[test]
+    fn build_line_overlays_cursor_character_when_editor_is_active() {
+        let theme = Theme::default();
+        let pane = EditorPane;
+        let mut engine = AnimationEngine::new(16);
+        engine.buffer.lines = vec!["ab".to_string()];
+        engine.buffer.cursor_line = 0;
+        engine.buffer.cursor_col = 1;
+        engine.cursor_visible = true;
+        engine.active_pane = ActivePane::Editor;
+        engine.buffer.new_highlights = vec![highlight(0, 2, TokenType::Keyword)];
+        engine.buffer.new_content_line_offsets = vec![0];
+
+        let line = pane.build_line("ab", 0, 3, &engine, &theme);
+
+        assert_eq!(line.spans[0].content.as_ref(), "  1 ");
+        assert_eq!(
+            line.spans[0].style.fg,
+            Some(theme.editor_line_number_cursor)
+        );
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].content.as_ref(), "  ");
+        assert_eq!(line.spans[1].style.fg, Some(theme.editor_separator));
+        assert_eq!(line.spans[2].style.fg, Some(theme.syntax_keyword));
+        assert_eq!(line.spans[3].content.as_ref(), "b");
+        assert_eq!(line.spans[3].style.fg, Some(theme.editor_cursor_char_fg));
+        assert_eq!(line.spans[3].style.bg, Some(theme.editor_cursor_char_bg));
+        assert!(line.spans[3].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_does_not_select_rows_when_cursor_is_outside_visible_window() {
+        let theme = Theme::default();
+        let mut above_scroll = AnimationEngine::new(16);
+        above_scroll.buffer.lines = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        above_scroll.buffer.scroll_offset = 1;
+        above_scroll.buffer.cursor_line = 0;
+
+        let above_scroll_buffer = render_buffer(&above_scroll, &theme, 16, 4);
+        assert!(!has_selected_row_background(
+            &above_scroll_buffer,
+            theme.editor_cursor_line_bg
+        ));
+
+        let mut below_viewport = AnimationEngine::new(16);
+        below_viewport.buffer.lines =
+            vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        below_viewport.buffer.cursor_line = 2;
+
+        let below_viewport_buffer = render_buffer(&below_viewport, &theme, 16, 4);
+        assert!(!has_selected_row_background(
+            &below_viewport_buffer,
+            theme.editor_cursor_line_bg
+        ));
+    }
+}

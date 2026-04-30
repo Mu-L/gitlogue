@@ -407,12 +407,13 @@ impl AnimationEngine {
             return false;
         }
         self.line_checkpoints.pop_back();
-        if let Some(snapshot) = self.line_checkpoints.back().cloned() {
-            self.apply_checkpoint(snapshot);
-            true
-        } else {
-            false
-        }
+        let snapshot = self
+            .line_checkpoints
+            .back()
+            .cloned()
+            .expect("line checkpoint should exist after len guard");
+        self.apply_checkpoint(snapshot);
+        true
     }
 
     pub fn restore_change_checkpoint(&mut self) -> bool {
@@ -420,12 +421,13 @@ impl AnimationEngine {
             return false;
         }
         self.change_checkpoints.pop_back();
-        if let Some(snapshot) = self.change_checkpoints.back().cloned() {
-            self.apply_checkpoint(snapshot);
-            true
-        } else {
-            false
-        }
+        let snapshot = self
+            .change_checkpoints
+            .back()
+            .cloned()
+            .expect("change checkpoint should exist after len guard");
+        self.apply_checkpoint(snapshot);
+        true
     }
 
     fn apply_checkpoint(&mut self, snapshot: ManualCheckpoint) {
@@ -1396,5 +1398,744 @@ impl AnimationEngine {
     /// Returns true if the animation has completed.
     pub fn is_finished(&self) -> bool {
         self.state == AnimationState::Finished
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn speed_rule(rule: &str) -> SpeedRule {
+        SpeedRule::parse(rule).expect("valid speed rule")
+    }
+
+    fn switch_file(path: &str, old_content: &str, new_content: &str) -> AnimationStep {
+        AnimationStep::SwitchFile {
+            file_index: 1,
+            old_content: old_content.to_string(),
+            new_content: new_content.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    fn line_change(change_type: LineChangeType, content: &str) -> crate::git::LineChange {
+        crate::git::LineChange {
+            change_type,
+            content: content.to_string(),
+            old_line_no: None,
+            new_line_no: None,
+        }
+    }
+
+    fn hunk(old_start: usize, lines: Vec<crate::git::LineChange>) -> DiffHunk {
+        DiffHunk {
+            old_start,
+            old_lines: lines.len(),
+            new_start: old_start,
+            new_lines: lines.len(),
+            lines,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn file_change(
+        path: &str,
+        old_path: Option<&str>,
+        status: FileStatus,
+        is_excluded: bool,
+        exclusion_reason: Option<&str>,
+        old_content: Option<&str>,
+        new_content: Option<&str>,
+        hunks: Vec<DiffHunk>,
+    ) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            old_path: old_path.map(str::to_string),
+            status,
+            is_binary: false,
+            is_excluded,
+            exclusion_reason: exclusion_reason.map(str::to_string),
+            old_content: old_content.map(str::to_string),
+            new_content: new_content.map(str::to_string),
+            hunks,
+            diff: String::new(),
+        }
+    }
+
+    fn metadata(hash: &str, message: &str, changes: Vec<FileChange>) -> CommitMetadata {
+        CommitMetadata {
+            hash: hash.to_string(),
+            author: "Author".to_string(),
+            date: DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            message: message.to_string(),
+            changes,
+        }
+    }
+
+    fn terminal_commands(steps: &[AnimationStep]) -> Vec<String> {
+        let (mut commands, current) = steps.iter().fold(
+            (Vec::new(), None::<String>),
+            |(mut commands, current), step| match step {
+                AnimationStep::TerminalPrompt => {
+                    if let Some(command) = current {
+                        commands.push(command);
+                    }
+                    (commands, Some(String::new()))
+                }
+                AnimationStep::TerminalTypeChar { ch } => {
+                    let mut command = current.unwrap_or_default();
+                    command.push(*ch);
+                    (commands, Some(command))
+                }
+                _ => (commands, current),
+            },
+        );
+
+        if let Some(command) = current {
+            commands.push(command);
+        }
+
+        commands
+    }
+
+    fn terminal_outputs(steps: &[AnimationStep]) -> Vec<String> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::TerminalOutput { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn speed_rule_uses_last_colon_as_separator() {
+        let rule = speed_rule("docs/v1:guide/*.md:45");
+
+        assert_eq!(rule.speed_ms, 45);
+        assert!(rule.matches("docs/v1:guide/readme.md"));
+        assert!(!rule.matches("docs/v1/guide/readme.md"));
+    }
+
+    #[test]
+    fn speed_rule_rejects_invalid_input() {
+        assert!(SpeedRule::parse("*.rs").is_none());
+        assert!(SpeedRule::parse("*.rs:not-a-number").is_none());
+        assert!(SpeedRule::parse("[*.rs:30").is_none());
+    }
+
+    #[test]
+    fn editor_buffer_inserts_using_character_index() {
+        let mut buffer = EditorBuffer::from_content("a界c");
+
+        buffer.insert_char(0, 2, 'B');
+
+        assert_eq!(buffer.lines, vec!["a界Bc"]);
+    }
+
+    #[test]
+    fn editor_buffer_insert_char_resizes_missing_lines() {
+        let mut buffer = EditorBuffer::new();
+
+        buffer.insert_char(2, 0, 'x');
+
+        assert_eq!(
+            buffer.lines,
+            vec![String::new(), String::new(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn editor_buffer_resizes_and_stays_non_empty() {
+        let mut buffer = EditorBuffer::new();
+
+        buffer.insert_line(2, "tail".to_string());
+        buffer.delete_line(2);
+        buffer.delete_line(1);
+        buffer.delete_line(0);
+
+        assert_eq!(buffer.lines, vec![String::new()]);
+    }
+
+    #[test]
+    fn manual_step_returns_false_when_not_playing() {
+        let mut engine = AnimationEngine::new(30);
+
+        assert!(!engine.manual_step(StepMode::Line));
+        assert_eq!(engine.state, AnimationState::Idle);
+    }
+
+    #[test]
+    fn manual_step_marks_finished_when_no_steps_remain() {
+        let mut engine = AnimationEngine::new(30);
+        engine.state = AnimationState::Playing;
+
+        assert!(!engine.manual_step(StepMode::Change));
+        assert_eq!(engine.state, AnimationState::Finished);
+    }
+
+    #[test]
+    fn switch_file_updates_editor_state_and_offsets() {
+        let mut engine = AnimationEngine::new(30);
+        engine.set_speed_rules(vec![speed_rule("src/**/*.rs:5")]);
+        engine.dialog_title = Some("Open File...".to_string());
+        engine.dialog_typing_text = "src/lib.rs".to_string();
+        engine.active_pane = ActivePane::Terminal;
+
+        engine.execute_step(switch_file("src/lib.rs", "old\r\nline", "new\nline"));
+
+        assert_eq!(engine.active_pane, ActivePane::Editor);
+        assert_eq!(engine.current_file_index, 1);
+        assert_eq!(engine.current_file_path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(engine.speed_ms, 5);
+        assert_eq!(engine.buffer.lines, vec!["old", "line"]);
+        assert_eq!(engine.buffer.old_content_line_offsets, vec![0, 5]);
+        assert_eq!(engine.buffer.new_content_line_offsets, vec![0, 4]);
+        assert_eq!(engine.dialog_title, None);
+        assert!(engine.dialog_typing_text.is_empty());
+    }
+
+    #[test]
+    fn load_commit_generates_special_file_sequences_for_regular_commits() {
+        let mut engine = AnimationEngine::new(30);
+        let commit = metadata(
+            "abcdef1234567890",
+            "Refine animation\n\nbody",
+            vec![
+                file_change(
+                    "Cargo.lock",
+                    None,
+                    FileStatus::Modified,
+                    true,
+                    Some("lock file"),
+                    Some("old"),
+                    Some("new"),
+                    vec![],
+                ),
+                file_change(
+                    "src/deleted.rs",
+                    None,
+                    FileStatus::Deleted,
+                    false,
+                    None,
+                    Some("obsolete();\n"),
+                    None,
+                    vec![],
+                ),
+                file_change(
+                    "src/renamed.rs",
+                    Some("src/original.rs"),
+                    FileStatus::Renamed,
+                    false,
+                    None,
+                    Some("before\n"),
+                    Some("after\n"),
+                    vec![],
+                ),
+                file_change(
+                    "src/lib.rs",
+                    None,
+                    FileStatus::Modified,
+                    false,
+                    None,
+                    Some("fn main() {\n}\n"),
+                    Some("fn main() {\n    println!(\"hi\");\n}\n"),
+                    vec![hunk(
+                        1,
+                        vec![
+                            line_change(LineChangeType::Context, "fn main() {"),
+                            line_change(LineChangeType::Addition, "    println!(\"hi\");"),
+                            line_change(LineChangeType::Context, "}"),
+                        ],
+                    )],
+                ),
+            ],
+        );
+
+        engine.load_commit(&commit);
+
+        let commands = terminal_commands(&engine.steps);
+        let outputs = terminal_outputs(&engine.steps);
+        let switched_paths = engine
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::SwitchFile { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            commands,
+            vec![
+                "time-travel 2024-01-02 03:04:05".to_string(),
+                "rm src/deleted.rs".to_string(),
+                "git add src/deleted.rs".to_string(),
+                "git add src/lib.rs".to_string(),
+                "mv src/original.rs src/renamed.rs".to_string(),
+                "git add src/renamed.rs".to_string(),
+                "git commit -m \"Refine animation\"".to_string(),
+                "git push origin main".to_string(),
+            ]
+        );
+        assert_eq!(
+            switched_paths,
+            vec![
+                "Cargo.lock".to_string(),
+                "src/deleted.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "src/renamed.rs".to_string(),
+            ]
+        );
+        assert_eq!(
+            engine
+                .steps
+                .iter()
+                .filter(|step| matches!(step, AnimationStep::OpenFileDialogStart))
+                .count(),
+            1
+        );
+        assert!(engine.steps.iter().any(|step| {
+            matches!(
+                step,
+                AnimationStep::InsertLine { line, content }
+                    if *line == 1 && content == "    "
+            )
+        }));
+        assert!(outputs
+            .iter()
+            .any(|text| text.contains("Cargo.lock (skipped - lock file)")));
+        assert!(outputs
+            .iter()
+            .any(|text| text.contains("Location: commit abcdef1 by Author")));
+        assert!(outputs.iter().any(|text| text.contains("Refine animation")));
+        assert!(outputs.iter().any(|text| text.contains("✨ SUCCESS")));
+        assert!(
+            matches!(engine.pending_metadata.as_ref(), Some(pending) if pending.hash == commit.hash)
+        );
+        assert_eq!(engine.buffer.lines, vec![String::new()]);
+    }
+
+    #[test]
+    fn load_commit_uses_working_tree_intro_without_commit_or_push_commands() {
+        let mut engine = AnimationEngine::new(30);
+        let diff = metadata(
+            "working-tree",
+            "Staged changes",
+            vec![file_change(
+                "src/draft.rs",
+                None,
+                FileStatus::Modified,
+                false,
+                None,
+                Some("fn main() {}\n"),
+                Some("fn main() {\n    println!(\"draft\");\n}\n"),
+                vec![hunk(
+                    1,
+                    vec![
+                        line_change(LineChangeType::Context, "fn main() {"),
+                        line_change(LineChangeType::Addition, "    println!(\"draft\");"),
+                        line_change(LineChangeType::Context, "}"),
+                    ],
+                )],
+            )],
+        );
+
+        engine.load_commit(&diff);
+
+        let commands = terminal_commands(&engine.steps);
+        let outputs = terminal_outputs(&engine.steps);
+
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("git diff --stat")
+        );
+        assert!(commands
+            .iter()
+            .any(|command| command == "git add src/draft.rs"));
+        assert!(!commands
+            .iter()
+            .any(|command| command.starts_with("git commit -m")));
+        assert!(!commands
+            .iter()
+            .any(|command| command == "git push origin main"));
+        assert!(outputs.iter().any(|text| text == "📝 Staged changes"));
+        assert!(outputs.iter().any(|text| text == "📁 1 file changed"));
+    }
+
+    #[test]
+    fn manual_step_records_and_restores_line_and_change_checkpoints() {
+        let mut engine = AnimationEngine::new(30);
+        engine.state = AnimationState::Playing;
+        engine.steps = vec![
+            AnimationStep::ResetState,
+            switch_file("src/lib.rs", "seed", "seed!\nbranch"),
+            AnimationStep::InsertChar {
+                line: 0,
+                col: 4,
+                ch: '!',
+            },
+            AnimationStep::Pause {
+                multiplier: INSERT_LINE_PAUSE,
+            },
+            AnimationStep::InsertLine {
+                line: 1,
+                content: "branch".to_string(),
+            },
+            AnimationStep::Pause {
+                multiplier: HUNK_PAUSE,
+            },
+        ];
+
+        assert!(engine.manual_step(StepMode::Line));
+        assert!(engine.manual_step(StepMode::Change));
+        assert_eq!(engine.buffer.lines, vec!["seed".to_string()]);
+
+        assert!(engine.manual_step(StepMode::Line));
+        assert_eq!(engine.buffer.lines, vec!["seed!".to_string()]);
+        assert_eq!(engine.line_checkpoints.len(), 2);
+        assert_eq!(engine.change_checkpoints.len(), 1);
+
+        assert!(engine.manual_step(StepMode::Change));
+        assert_eq!(
+            engine.buffer.lines,
+            vec!["seed!".to_string(), "branch".to_string()]
+        );
+        assert_eq!(engine.line_checkpoints.len(), 3);
+        assert_eq!(engine.change_checkpoints.len(), 2);
+
+        assert!(engine.restore_line_checkpoint());
+        assert_eq!(engine.buffer.lines, vec!["seed!".to_string()]);
+        assert_eq!(engine.current_step, 4);
+        assert_eq!(engine.state, AnimationState::Playing);
+        assert!(engine.paused);
+
+        assert!(engine.restore_change_checkpoint());
+        assert_eq!(engine.buffer.lines, vec!["seed".to_string()]);
+        assert_eq!(engine.current_step, 2);
+        assert!(matches!(
+            engine.current_file_path.as_deref(),
+            Some("src/lib.rs")
+        ));
+    }
+
+    #[test]
+    fn record_checkpoint_deduplicates_and_evicts_oldest_snapshots() {
+        let checkpoint_steps = || {
+            (0..=(MAX_LINE_CHECKPOINTS + 2))
+                .map(|_| AnimationStep::TerminalPrompt)
+                .collect::<Vec<_>>()
+        };
+        let mut dedupe_engine = AnimationEngine::new(30);
+        dedupe_engine.steps = checkpoint_steps();
+        dedupe_engine.current_step = 3;
+        dedupe_engine.record_checkpoint(CheckpointKind::Line);
+        dedupe_engine.record_checkpoint(CheckpointKind::Line);
+        dedupe_engine.record_checkpoint(CheckpointKind::Change);
+        dedupe_engine.record_checkpoint(CheckpointKind::Change);
+        assert_eq!(dedupe_engine.line_checkpoints.len(), 1);
+        assert_eq!(dedupe_engine.change_checkpoints.len(), 1);
+
+        let mut line_engine = AnimationEngine::new(30);
+        line_engine.steps = checkpoint_steps();
+        (1..=(MAX_LINE_CHECKPOINTS + 1)).for_each(|step| {
+            line_engine.current_step = step;
+            line_engine.record_checkpoint(CheckpointKind::Line);
+        });
+        assert_eq!(line_engine.line_checkpoints.len(), MAX_LINE_CHECKPOINTS);
+        assert_eq!(
+            line_engine.line_checkpoints.front().map(|c| c.step_index),
+            Some(3)
+        );
+
+        let mut change_engine = AnimationEngine::new(30);
+        change_engine.steps = checkpoint_steps();
+        (1..=(MAX_CHANGE_CHECKPOINTS + 1)).for_each(|step| {
+            change_engine.current_step = step;
+            change_engine.record_checkpoint(CheckpointKind::Change);
+        });
+        assert_eq!(
+            change_engine.change_checkpoints.len(),
+            MAX_CHANGE_CHECKPOINTS
+        );
+        assert_eq!(
+            change_engine
+                .change_checkpoints
+                .front()
+                .map(|c| c.step_index),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn switch_file_uses_default_speed_and_empty_content_fallbacks() {
+        let mut engine = AnimationEngine::new(42);
+        engine.set_speed_rules(vec![speed_rule("*.rs:5")]);
+
+        engine.execute_step(switch_file("notes.txt", "", ""));
+
+        assert_eq!(engine.speed_ms, 42);
+        assert_eq!(engine.buffer.lines, vec![String::new()]);
+        assert_eq!(engine.buffer.old_content_lines, vec![String::new()]);
+        assert_eq!(engine.buffer.new_content_lines, vec![String::new()]);
+        assert_eq!(engine.buffer.old_content_line_offsets, vec![0]);
+        assert_eq!(engine.buffer.new_content_line_offsets, vec![0]);
+        assert!(engine.buffer.cached_highlights.is_empty());
+    }
+
+    #[test]
+    fn generate_cursor_movement_covers_short_medium_and_long_distances() {
+        let mut short_engine = AnimationEngine::new(20);
+
+        assert_eq!(short_engine.generate_cursor_movement(2, 2, 0, &[]), 2);
+        assert!(short_engine.steps.is_empty());
+
+        let short_lines = ["root", " one", "  two"];
+        assert_eq!(
+            short_engine.generate_cursor_movement(0, 2, 2, &short_lines),
+            2
+        );
+        assert!(matches!(
+            short_engine.steps.first(),
+            Some(AnimationStep::MoveCursor { line: 1, col: 1 })
+        ));
+        assert!(matches!(
+            short_engine.steps.get(2),
+            Some(AnimationStep::MoveCursor { line: 2, col: 2 })
+        ));
+        assert!(short_engine.steps.iter().all(|step| match step {
+            AnimationStep::Pause { multiplier } => {
+                (*multiplier - CURSOR_MOVE_PAUSE * CURSOR_MOVE_SHORT_MULTIPLIER).abs()
+                    < f64::EPSILON
+            }
+            _ => true,
+        }));
+
+        let medium_lines = (0..=60)
+            .map(|line| format!("{}line {line}", " ".repeat(line % 4)))
+            .collect::<Vec<_>>();
+        let medium_refs = medium_lines.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut medium_engine = AnimationEngine::new(20);
+        assert_eq!(
+            medium_engine.generate_cursor_movement(60, 0, 60, &medium_refs),
+            0
+        );
+        let medium_moves = medium_engine
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::MoveCursor { line, .. } => Some(*line),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(medium_moves.len() < 60);
+        assert_eq!(medium_moves.last(), Some(&0));
+        assert!(medium_moves.windows(2).all(|pair| pair[0] > pair[1]));
+        assert!(medium_engine.steps.iter().all(|step| match step {
+            AnimationStep::Pause { multiplier } => {
+                (*multiplier - CURSOR_MOVE_PAUSE * CURSOR_MOVE_MEDIUM_MULTIPLIER).abs()
+                    < f64::EPSILON
+            }
+            _ => true,
+        }));
+
+        let long_lines = (0..=250)
+            .map(|line| format!("{}item {line}", " ".repeat(line % 3)))
+            .collect::<Vec<_>>();
+        let long_refs = long_lines.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut long_engine = AnimationEngine::new(20);
+        assert_eq!(
+            long_engine.generate_cursor_movement(250, 0, 250, &long_refs),
+            0
+        );
+        let long_moves = long_engine
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                AnimationStep::MoveCursor { line, .. } => Some(*line),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(long_moves.len() <= MAX_SCROLL_STEPS);
+        assert_eq!(long_moves.last(), Some(&0));
+        assert!(long_engine.steps.iter().all(|step| match step {
+            AnimationStep::Pause { multiplier } => {
+                (*multiplier - CURSOR_MOVE_PAUSE * CURSOR_MOVE_LONG_MULTIPLIER).abs() < f64::EPSILON
+            }
+            _ => true,
+        }));
+    }
+
+    #[test]
+    fn generate_steps_for_hunk_handles_context_deletion_and_addition() {
+        let mut engine = AnimationEngine::new(30);
+        let hunk = hunk(
+            1,
+            vec![
+                line_change(LineChangeType::Context, "  keep"),
+                line_change(LineChangeType::Deletion, "removed"),
+                line_change(LineChangeType::Addition, "    added();"),
+                line_change(LineChangeType::Context, "tail"),
+            ],
+        );
+
+        assert_eq!(engine.generate_steps_for_hunk(&hunk, 0, 2), (4, 5));
+        assert!(matches!(
+            engine.steps.first(),
+            Some(AnimationStep::MoveCursor { line: 2, col: 2 })
+        ));
+        assert!(matches!(
+            engine.steps.get(2),
+            Some(AnimationStep::DeleteLine { line: 3 })
+        ));
+        assert!(matches!(
+            engine.steps.get(4),
+            Some(AnimationStep::InsertLine { line: 3, content }) if content == "    "
+        ));
+        assert!(matches!(
+            engine.steps.get(5),
+            Some(AnimationStep::InsertChar {
+                line: 3,
+                col: 4,
+                ch: 'a'
+            })
+        ));
+        assert!(matches!(
+            engine.steps.get(13),
+            Some(AnimationStep::Pause { multiplier })
+                if (*multiplier - INSERT_LINE_PAUSE).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            engine.steps.last(),
+            Some(AnimationStep::Pause { multiplier })
+                if (*multiplier - CURSOR_MOVE_PAUSE).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn execute_step_updates_dialog_terminal_and_editor_cursor_state() {
+        let mut engine = AnimationEngine::new(30);
+
+        engine.execute_step(AnimationStep::OpenFileDialogStart);
+        engine.execute_step(AnimationStep::DialogTypeChar { ch: 's' });
+        engine.execute_step(AnimationStep::TerminalPrompt);
+        engine.execute_step(AnimationStep::TerminalTypeChar { ch: 'g' });
+        engine.buffer = EditorBuffer::from_content("line\n  kept");
+        engine.execute_step(AnimationStep::DeleteLine { line: 0 });
+        engine.execute_step(AnimationStep::MoveCursor { line: 0, col: 2 });
+
+        assert_eq!(engine.dialog_title.as_deref(), Some("Open File..."));
+        assert_eq!(engine.dialog_typing_text, "s");
+        assert_eq!(engine.terminal_lines, vec!["~ g".to_string()]);
+        assert_eq!(engine.buffer.lines, vec!["  kept".to_string()]);
+        assert_eq!(engine.buffer.cursor_line, 0);
+        assert_eq!(engine.buffer.cursor_col, 2);
+        assert_eq!(engine.line_offset, -1);
+        assert_eq!(engine.active_pane, ActivePane::Editor);
+    }
+
+    #[test]
+    fn tick_honors_manual_pause_timed_pause_and_finished_state() {
+        let mut engine = AnimationEngine::new(1);
+        engine.state = AnimationState::Playing;
+        engine.pending_metadata = Some(metadata("abcdef1", "Tick", vec![]));
+        engine.steps = vec![
+            AnimationStep::ResetState,
+            AnimationStep::Pause { multiplier: 1.0 },
+            AnimationStep::TerminalOutput {
+                text: "done".to_string(),
+            },
+        ];
+        engine.frame_interval_ms = 0;
+        engine.next_step_delay = 0;
+        engine.last_update = Instant::now() - Duration::from_millis(10);
+        engine.last_frame = Instant::now() - Duration::from_millis(10);
+        engine.cursor_blink_timer = Instant::now() - Duration::from_millis(600);
+
+        assert!(engine.tick());
+        assert!(!engine.cursor_visible);
+        assert_eq!(engine.current_step, 1);
+        assert!(matches!(
+            engine.current_metadata.as_ref(),
+            Some(current) if current.hash == "abcdef1"
+        ));
+
+        engine.pause();
+        assert!(engine.tick());
+        assert_eq!(engine.current_step, 1);
+
+        engine.resume();
+        engine.last_update = Instant::now() - Duration::from_millis(10);
+        engine.last_frame = Instant::now() - Duration::from_millis(10);
+        assert!(engine.tick());
+        assert_eq!(engine.current_step, 2);
+        assert!(engine.pause_until.is_some());
+
+        assert!(engine.tick());
+        assert_eq!(engine.current_step, 2);
+
+        engine.pause_until = Some(Instant::now() - Duration::from_millis(1));
+        engine.last_update = Instant::now() - Duration::from_millis(10);
+        engine.last_frame = Instant::now() - Duration::from_millis(10);
+        assert!(engine.tick());
+        assert_eq!(engine.terminal_lines, vec!["done".to_string()]);
+        assert_eq!(engine.state, AnimationState::Finished);
+
+        assert!(!engine.tick());
+    }
+
+    #[test]
+    fn tick_waits_for_next_frame_and_setters_update_dimensions() {
+        let mut engine = AnimationEngine::new(30);
+
+        engine.set_content_width(0);
+        engine.set_viewport_height(7);
+        assert_eq!(engine.content_width, 0);
+        assert_eq!(engine.viewport_height, 7);
+        assert_eq!(engine.calculate_line_display_height("wrapped"), 1);
+
+        engine.state = AnimationState::Playing;
+        engine.frame_interval_ms = 1_000;
+        engine.last_frame = Instant::now();
+        engine.cursor_blink_timer = Instant::now();
+
+        assert!(!engine.tick());
+        assert_eq!(engine.state, AnimationState::Playing);
+    }
+
+    #[test]
+    fn update_scroll_handles_zero_dimensions_middle_and_bottom_alignment() {
+        let mut engine = AnimationEngine::new(30);
+
+        assert_eq!(engine.calculate_line_display_height("wrapped"), 1);
+
+        engine.content_width = 6;
+        assert_eq!(engine.calculate_line_display_height("wrapped"), 1);
+
+        engine.buffer.lines = vec![
+            "line 0".to_string(),
+            "line 1".to_string(),
+            "line 2".to_string(),
+            "line 3".to_string(),
+            "line 4".to_string(),
+            "line 5".to_string(),
+        ];
+        engine.viewport_height = 0;
+        engine.buffer.cursor_line = 4;
+        engine.update_scroll();
+        assert_eq!(engine.buffer.scroll_offset, 0);
+
+        engine.content_width = 30;
+        engine.viewport_height = 2;
+        engine.buffer.cursor_line = 3;
+        engine.update_scroll();
+        assert_eq!(engine.buffer.scroll_offset, 2);
+
+        engine.buffer.cursor_line = 5;
+        engine.update_scroll();
+        assert_eq!(engine.buffer.scroll_offset, 4);
     }
 }
