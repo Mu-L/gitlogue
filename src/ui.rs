@@ -988,6 +988,20 @@ mod tests {
     }
 
     #[test]
+    fn close_menu_restores_previous_state_without_resuming_paused_playback() {
+        let mut ui = test_ui();
+        ui.state = UIState::Menu;
+        ui.prev_state = Some(Box::new(UIState::About));
+        ui.playback_state = PlaybackState::Paused;
+
+        ui.close_menu();
+
+        assert_eq!(ui.state, UIState::About);
+        assert!(ui.prev_state.is_none());
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+    }
+
+    #[test]
     fn handle_key_event_navigates_menu_and_dialogs() {
         let mut ui = test_ui();
         ui.state = UIState::Menu;
@@ -1017,6 +1031,25 @@ mod tests {
         ui.menu_index = 2;
         ui.handle_key_event(key_event(KeyCode::Enter));
         assert_eq!(ui.state, UIState::Finished);
+    }
+
+    #[test]
+    fn handle_key_event_ignores_irrelevant_menu_overlay_and_finished_keys() {
+        let mut menu_ui = test_ui();
+        menu_ui.state = UIState::Menu;
+        menu_ui.menu_index = 1;
+        menu_ui.handle_key_event(key_event(KeyCode::Left));
+        assert_eq!(menu_ui.menu_index, 1);
+
+        let mut overlay_ui = test_ui();
+        overlay_ui.state = UIState::About;
+        overlay_ui.handle_key_event(key_event(KeyCode::Left));
+        assert_eq!(overlay_ui.state, UIState::About);
+
+        let mut finished_ui = test_ui();
+        finished_ui.state = UIState::Finished;
+        finished_ui.handle_key_event(key_event(KeyCode::Left));
+        assert_eq!(finished_ui.state, UIState::Finished);
     }
 
     #[test]
@@ -1073,6 +1106,21 @@ mod tests {
     }
 
     #[test]
+    fn handle_prev_without_history_and_manual_shortcuts_are_safe() {
+        let mut ui = test_ui();
+        ui.handle_prev();
+        ui.handle_key_event(key_event(KeyCode::Char('h')));
+        ui.handle_key_event(key_event(KeyCode::Char('H')));
+        ui.handle_key_event(key_event(KeyCode::Char('L')));
+        ui.handle_key_event(key_event(KeyCode::Char('x')));
+        ui.handle_key_event(key_event(KeyCode::Up));
+
+        assert_eq!(ui.playback_state, PlaybackState::Paused);
+        assert_eq!(ui.state, UIState::Playing);
+        assert!(ui.history_index.is_none());
+    }
+
+    #[test]
     fn handle_key_event_maps_playback_shortcuts() {
         let mut ui = test_ui();
         ui.load_commit(metadata("1111111", "first"));
@@ -1111,6 +1159,17 @@ mod tests {
     }
 
     #[test]
+    fn key_helpers_only_treat_expected_inputs_as_quit_shortcuts() {
+        assert!(UI::is_ctrl_c(ctrl_key_event('c')));
+        assert!(!UI::is_ctrl_c(key_event(KeyCode::Char('c'))));
+        assert!(!UI::is_ctrl_c(ctrl_key_event('x')));
+
+        assert!(UI::is_quit_key(key_event(KeyCode::Char('q'))));
+        assert!(UI::is_quit_key(ctrl_key_event('c')));
+        assert!(!UI::is_quit_key(key_event(KeyCode::Enter)));
+    }
+
+    #[test]
     fn advance_to_next_commit_uses_repo_order_and_finishes_after_last_commit() -> Result<()> {
         let test_repo = TestRepo::new();
         let first = test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
@@ -1133,6 +1192,24 @@ mod tests {
 
         assert!(!ui.advance_to_next_commit());
         assert_eq!(ui.state, UIState::Finished);
+
+        Ok(())
+    }
+
+    #[test]
+    fn handle_next_advances_repo_when_history_has_no_future() -> Result<()> {
+        let test_repo = TestRepo::new();
+        let first = test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
+        let repo = GitRepository::open(&test_repo.path)?;
+        let mut ui = test_ui_with_repo(Some(&repo));
+
+        ui.handle_next();
+
+        assert_eq!(
+            ui.history.last().map(|item| item.hash.as_str()),
+            Some(first.as_str())
+        );
+        assert_eq!(ui.state, UIState::Playing);
 
         Ok(())
     }
@@ -1162,6 +1239,21 @@ mod tests {
     }
 
     #[test]
+    fn advance_to_next_commit_finishes_when_loop_reset_cannot_fetch() -> Result<()> {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file("src/lib.rs", "fn only() {}\n", "only", 1);
+        let repo = GitRepository::open(&test_repo.path)?;
+        let mut ui = test_ui_with_repo(Some(&repo));
+        ui.commit_spec = Some("missing".to_string());
+        ui.loop_playback = true;
+
+        assert!(!ui.advance_to_next_commit());
+        assert_eq!(ui.state, UIState::Finished);
+
+        Ok(())
+    }
+
+    #[test]
     fn fetch_repo_commit_supports_random_commit_specs_and_ranges() -> Result<()> {
         let test_repo = TestRepo::new();
         let first = test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
@@ -1186,6 +1278,13 @@ mod tests {
         range_random_ui.order = PlaybackOrder::Random;
         let random_hash = range_random_ui.fetch_repo_commit(&repo)?.hash;
         assert!([second.as_str(), third.as_str()].contains(&random_hash.as_str()));
+
+        repo.set_commit_range(&range)?;
+
+        let mut range_asc_ui = test_ui_with_repo(Some(&repo));
+        range_asc_ui.is_range_mode = true;
+        range_asc_ui.order = PlaybackOrder::Asc;
+        assert_eq!(range_asc_ui.fetch_repo_commit(&repo)?.hash, second);
 
         repo.set_commit_range(&range)?;
 
@@ -1334,6 +1433,22 @@ mod tests {
             ui.history.last().map(|item| item.hash.as_str()),
             Some(first.as_str())
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn advance_state_after_tick_keeps_waiting_before_resume_deadline() -> Result<()> {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file("src/lib.rs", "fn first() {}\n", "first", 1);
+        let repo = GitRepository::open(&test_repo.path)?;
+        let resume_at = Instant::now() + Duration::from_secs(1);
+        let mut ui = test_ui_with_repo(Some(&repo));
+        ui.state = UIState::WaitingForNext { resume_at };
+
+        assert!(ui.advance_state_after_tick(Instant::now()));
+        assert!(matches!(ui.state, UIState::WaitingForNext { .. }));
+        assert!(ui.history.is_empty());
 
         Ok(())
     }
