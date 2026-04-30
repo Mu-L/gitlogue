@@ -1284,6 +1284,44 @@ mod tests {
             Self { path, repo }
         }
 
+        fn commit_index(
+            &self,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            let mut index = self.repo.index().unwrap();
+            index.write().unwrap();
+
+            let tree_id = index.write_tree().unwrap();
+            let tree = self.repo.find_tree(tree_id).unwrap();
+            let signature =
+                git2::Signature::new(author_name, author_email, &git2::Time::new(timestamp, 0))
+                    .unwrap();
+            let parent = self
+                .repo
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_commit().ok());
+
+            match parent.as_ref() {
+                Some(parent_commit) => self.repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[parent_commit],
+                ),
+                None => self
+                    .repo
+                    .commit(Some("HEAD"), &signature, &signature, message, &tree, &[]),
+            }
+            .unwrap()
+            .to_string()
+        }
+
         fn commit_file(
             &self,
             relative_path: &str,
@@ -1304,34 +1342,25 @@ mod tests {
             let mut index = self.repo.index().unwrap();
             index.add_path(std::path::Path::new(relative_path)).unwrap();
             index.write().unwrap();
+            self.commit_index(author_name, author_email, timestamp, message)
+        }
 
-            let tree_id = index.write_tree().unwrap();
-            let tree = self.repo.find_tree(tree_id).unwrap();
-            let signature =
-                git2::Signature::new(author_name, author_email, &git2::Time::new(timestamp, 0))
-                    .unwrap();
-            let parent = self
-                .repo
-                .head()
-                .ok()
-                .and_then(|head| head.peel_to_commit().ok());
+        fn remove_file(
+            &self,
+            relative_path: &str,
+            author_name: &str,
+            author_email: &str,
+            timestamp: i64,
+            message: &str,
+        ) -> String {
+            std::fs::remove_file(self.path.join(relative_path)).unwrap();
 
-            let oid = match parent.as_ref() {
-                Some(parent_commit) => self.repo.commit(
-                    Some("HEAD"),
-                    &signature,
-                    &signature,
-                    message,
-                    &tree,
-                    &[parent_commit],
-                ),
-                None => self
-                    .repo
-                    .commit(Some("HEAD"), &signature, &signature, message, &tree, &[]),
-            }
-            .unwrap();
-
-            oid.to_string()
+            let mut index = self.repo.index().unwrap();
+            index
+                .remove_path(std::path::Path::new(relative_path))
+                .unwrap();
+            index.write().unwrap();
+            self.commit_index(author_name, author_email, timestamp, message)
         }
     }
 
@@ -1960,5 +1989,101 @@ mod tests {
         );
         assert!(unstaged_change.new_content.is_none());
         assert!(unstaged_change.is_excluded);
+    }
+
+    #[test]
+    fn test_get_commit_handles_added_and_deleted_file_contents() {
+        let test_repo = TestRepo::new();
+        test_repo.commit_file(
+            "tracked.txt",
+            "tracked\n",
+            "Alice Example",
+            "alice@example.com",
+            1_700_006_000,
+            "base commit",
+        );
+        let added_hash = test_repo.commit_file(
+            "added.txt",
+            "added\n",
+            "Bob Example",
+            "bob@example.com",
+            1_700_006_060,
+            "add file",
+        );
+        let deleted_hash = test_repo.remove_file(
+            "tracked.txt",
+            "Carol Example",
+            "carol@example.com",
+            1_700_006_120,
+            "delete file",
+        );
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let added_change = repo
+            .get_commit(&added_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "added.txt")
+            .unwrap();
+        let deleted_change = repo
+            .get_commit(&deleted_hash)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "tracked.txt")
+            .unwrap();
+
+        assert_eq!(added_change.status, FileStatus::Added);
+        assert!(added_change.old_content.is_none());
+        assert_eq!(added_change.new_content.as_deref(), Some("added\n"));
+        assert_eq!(deleted_change.status, FileStatus::Deleted);
+        assert_eq!(deleted_change.old_content.as_deref(), Some("tracked\n"));
+        assert!(deleted_change.new_content.is_none());
+    }
+
+    #[test]
+    fn test_working_tree_diff_excludes_lockfiles_and_preserves_context_lines() {
+        let test_repo = TestRepo::new();
+        let original = "version = 3\n[[package]]\nname = \"gitlogue\"\nchecksum = \"old\"\n";
+        let updated = "version = 3\n[[package]]\nname = \"gitlogue\"\nchecksum = \"new\"\n";
+        test_repo.commit_file(
+            "Cargo.lock",
+            original,
+            "Alice Example",
+            "alice@example.com",
+            1_700_007_000,
+            "lock base",
+        );
+
+        std::fs::write(test_repo.path.join("Cargo.lock"), updated).unwrap();
+        let mut index = test_repo.repo.index().unwrap();
+        index.add_path(std::path::Path::new("Cargo.lock")).unwrap();
+        index.write().unwrap();
+
+        let repo = GitRepository::open(&test_repo.path).unwrap();
+        let change = repo
+            .get_working_tree_diff(DiffMode::Staged)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find(|change| change.path == "Cargo.lock")
+            .unwrap();
+        let context_lines = change
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| matches!(line.change_type, LineChangeType::Context))
+            .map(|line| (line.content.clone(), line.old_line_no, line.new_line_no))
+            .collect::<Vec<_>>();
+
+        assert!(change.is_excluded);
+        assert_eq!(
+            change.exclusion_reason.as_deref(),
+            Some("lock/generated file")
+        );
+        assert_eq!(change.old_content.as_deref(), Some(original));
+        assert_eq!(change.new_content.as_deref(), Some(updated));
+        assert!(context_lines.contains(&("name = \"gitlogue\"\n".to_string(), Some(3), Some(3),)));
     }
 }
