@@ -1,8 +1,9 @@
 use anyhow::Result;
 use git2::{Repository, Signature, Time};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,6 +133,37 @@ fn run_command(command: &mut Command) -> Result<Output> {
     Ok(command.output()?)
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn run_in_pseudo_tty(home: &TempHome, args: &[&str], input: &[u8]) -> Result<Output> {
+    let command = std::iter::once(shell_quote(env!("CARGO_BIN_EXE_gitlogue")))
+        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut child = Command::new("script")
+        .args(["-qefc", &command, "/dev/null"])
+        .env("HOME", &home.path)
+        .env("USERPROFILE", &home.path)
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .env("TERM", "xterm-256color")
+        .env("COLUMNS", "100")
+        .env("LINES", "40")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .expect("script stdin should be piped")
+        .write_all(input)?;
+    let _ = child.stdin.take();
+    Ok(child.wait_with_output()?)
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
@@ -223,6 +255,40 @@ fn default_playback_fails_only_after_ui_startup_without_tty() -> Result<()> {
     assert!(!output.status.success());
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("No such device or address"));
+
+    Ok(())
+}
+
+#[test]
+fn default_playback_quits_cleanly_in_pseudo_tty() -> Result<()> {
+    let home = TempHome::new()?;
+    let repo = TestRepo::new()?;
+    repo.commit_file("src/main.rs", "fn main() {}\n", "initial", 1)?;
+
+    let output = run_in_pseudo_tty(&home, &["--path", repo_path(&repo).to_str().unwrap()], b"q")?;
+
+    assert!(output.status.success());
+    assert_eq!(stderr(&output), "");
+
+    Ok(())
+}
+
+#[test]
+fn diff_subcommand_with_staged_changes_quits_cleanly_in_pseudo_tty() -> Result<()> {
+    let home = TempHome::new()?;
+    let repo = TestRepo::new()?;
+    repo.commit_file("src/lib.rs", "fn clean() {}\n", "initial", 1)?;
+    repo.write_file("src/lib.rs", "fn staged() {}\n")?;
+    repo.stage_file("src/lib.rs")?;
+
+    let output = run_in_pseudo_tty(
+        &home,
+        &["--path", repo_path(&repo).to_str().unwrap(), "diff"],
+        b"q",
+    )?;
+
+    assert!(output.status.success());
+    assert_eq!(stderr(&output), "");
 
     Ok(())
 }
